@@ -41,7 +41,8 @@ def fmt_pct(v: float | None, sinal: bool = True) -> str:
 def style_market_table(df: pd.DataFrame):
     """
     Aplica cores em:
-    - Variação % vs média 5  (verde / vermelho)
+    - Coluna de variação percentual (nome pode ser 'Variação % vs média 5'
+      ou 'Var % vs 5d', dependendo da tabela)
     - Status ('Vender' em vermelho)
     """
 
@@ -64,10 +65,23 @@ def style_market_table(df: pd.DataFrame):
             return "color:#ef4444;"
         return ""
 
-    styler = df.style.applymap(color_var, subset=["Variação % vs média 5"])
+    styler = df.style
+
+    # tenta achar a coluna de variação por nome
+    var_cols = []
+    if "Variação % vs média 5" in df.columns:
+        var_cols.append("Variação % vs média 5")
+    if "Var % vs 5d" in df.columns:
+        var_cols.append("Var % vs 5d")
+
+    if var_cols:
+        styler = styler.applymap(color_var, subset=var_cols)
+
     if "Status" in df.columns:
         styler = styler.applymap(color_status, subset=["Status"])
+
     return styler
+
 
 
 # ============================================
@@ -339,9 +353,8 @@ def render():
             f"dos últimos 5 registros — {msg_text}"
         )
 
-        # ---- Layout 2 colunas + sparkline alinhado à direita ----
         # ---- Layout: blocos numéricos à esquerda + gráfico à direita ----
-        col_left, col_right = st.columns([1.15, 1.1])  # ajuste 2.3 / 1.7 se quiser mover mais
+        col_left, col_right = st.columns([1.15, 1.1])
 
         # -------------------------
         # Bloco numérico (esquerda)
@@ -423,11 +436,7 @@ def render():
 
             st.altair_chart(spark, use_container_width=True)
 
-
-
-
-
-        # Veredito destacado logo abaixo dos números (sem ficar “lá embaixo”)
+        # Veredito destacado logo abaixo dos números
         st.markdown(
             f"""
             <div style="
@@ -541,8 +550,6 @@ def render():
             df_prices_all_for_sum.rename(columns={"item_name": "item"})
         )
 
-        col_up, col_down = st.columns(2)
-
         top_gain = (
             df_sum_all.sort_values("Variação % vs média 5", ascending=False)
             .head(5)
@@ -561,19 +568,30 @@ def render():
             df["Variação % vs média 5"] = df["Variação % vs média 5"].apply(
                 lambda x: fmt_pct(x * 100.0 if abs(x) < 1.0 else x)
             )
+
+            # rótulos mais curtos pra caber melhor em telas menores
+            df = df.rename(
+                columns={
+                    "Último preço (zeny)": "Últ. preço",
+                    "Média últimos 5": "Média 5d",
+                    "Variação % vs média 5": "Var % vs 5d",
+                }
+            )
+
             return df[
                 [
                     "Item",
                     "Última data",
-                    "Último preço (zeny)",
-                    "Média últimos 5",
-                    "Variação % vs média 5",
+                    "Últ. preço",
+                    "Média 5d",
+                    "Var % vs 5d",
                     "Status",
                 ]
             ]
 
-        with col_up:
-            st.caption("📈 Maiores altas")
+        tab_up, tab_down = st.tabs(["📈 Maiores altas", "📉 Maiores quedas"])
+
+        with tab_up:
             df_up = prepare_top(top_gain)
             st.dataframe(
                 style_market_table(df_up),
@@ -581,8 +599,7 @@ def render():
                 hide_index=True,
             )
 
-        with col_down:
-            st.caption("📉 Maiores quedas")
+        with tab_down:
             df_down = prepare_top(top_loss)
             st.dataframe(
                 style_market_table(df_down),
