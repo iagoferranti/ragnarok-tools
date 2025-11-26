@@ -1,0 +1,10 @@
+# venv
+.venv/
+venv/
+
+# caches
+__pycache__/
+*.pyc
+
+# banco local
+market.db
