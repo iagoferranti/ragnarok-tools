@@ -524,7 +524,9 @@ def render():
             hist_display.sort_values("Data", ascending=False).reset_index(drop=True),
             use_container_width=True,
             hide_index=True,
+            height=400,  # 👈 altura fixa, o extra vira scroll interno
         )
+
 
     st.markdown("---")
 
@@ -597,7 +599,9 @@ def render():
                 style_market_table(df_up),
                 use_container_width=True,
                 hide_index=True,
+                height=260,
             )
+
 
         with tab_down:
             df_down = prepare_top(top_loss)
@@ -605,7 +609,9 @@ def render():
                 style_market_table(df_down),
                 use_container_width=True,
                 hide_index=True,
+                height=260,
             )
+
 
     st.markdown("---")
 
@@ -650,7 +656,9 @@ def render():
             style_market_table(df_display),
             use_container_width=True,
             hide_index=True,
+            height=450,  # ajusta se quiser maior/menor
         )
+
 
 
 render()
