@@ -25,24 +25,27 @@ def render():
         if st.button("Sair", type="secondary"):
             for key in ("auth_ok", "user_email", "username"):
                 ss.pop(key, None)
-            st.experimental_rerun()
+            st.rerun()
         return
 
     st.markdown(
         """
-        Informe seu **e-mail cadastrado** para acessar o painel.
+        Informe seu **e-mail cadastrado** para acessar o painel.  
         Se o e-mail não estiver na lista de liberados, fale com o administrador.
         """
     )
 
-    email_input = st.text_input(
-        "E-mail",
-        placeholder="voce@exemplo.com",
-    )
+    # 👇 Formulário: Enter dentro do input dispara o submit
+    with st.form("login_form"):
+        email_input = st.text_input(
+            "E-mail",
+            placeholder="voce@exemplo.com",
+        )
 
-    login_clicked = st.button("Entrar", use_container_width=True)
+        # Botão padrão (sem use_container_width) = mais minimalista
+        submit = st.form_submit_button("Entrar")
 
-    if login_clicked:
+    if submit:
         email_norm = (email_input or "").strip().lower()
 
         if not email_norm:
