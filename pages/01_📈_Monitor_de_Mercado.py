@@ -28,10 +28,11 @@ from services.market import compute_summary
 apply_theme("Monitor de Mercado – Ragnarok LATAM", page_icon="📈")
 
 def is_admin() -> bool:
-    """Retorna True se o usuário logado estiver na lista de admins."""
-    username = st.session_state.get("username", "")
-    admins = st.secrets["roles"]["admins"]
-    return username in admins
+    """Retorna True se o e-mail logado estiver na lista de admins."""
+    email = (st.session_state.get("user_email") or "").lower()
+    admins = [e.lower() for e in st.secrets["roles"]["admins"]]
+    return email in admins
+
 
 
 # ============================================
@@ -378,7 +379,7 @@ def render():
 
 
 
-        # ------------------------------
+    # ------------------------------
     #  Card de registro diário
     # ------------------------------
     st.markdown(

@@ -12,9 +12,11 @@ from db.database import (
 # Mesmo helper de admin usado no Monitor
 # ---------------------------------------
 def is_admin() -> bool:
-    username = st.session_state.get("username", "")
-    admins = st.secrets["roles"]["admins"]
-    return username in admins
+    """Retorna True se o e-mail logado estiver na lista de admins."""
+    email = (st.session_state.get("user_email") or "").lower()
+    admins = [e.lower() for e in st.secrets["roles"]["admins"]]
+    return email in admins
+
 
 
 apply_theme("Admin – Solicitações de Preço", page_icon="🛠️")
