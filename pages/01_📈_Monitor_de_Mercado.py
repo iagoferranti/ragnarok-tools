@@ -4,6 +4,7 @@ from datetime import date, timedelta
 import altair as alt
 import pandas as pd
 import streamlit as st
+import unicodedata
 
 from ui.theme import apply_theme
 from db.database import (
@@ -33,6 +34,16 @@ def is_admin() -> bool:
     admins = [e.lower() for e in st.secrets["roles"]["admins"]]
     return email in admins
 
+
+def normalize_text(txt: str) -> str:
+    if not isinstance(txt, str):
+        return ""
+    return (
+        unicodedata.normalize("NFKD", txt)
+        .encode("ASCII", "ignore")
+        .decode("utf-8")
+        .lower()
+    )
 
 
 # ============================================
@@ -210,28 +221,49 @@ def render():
 
     df_prices_all = get_all_prices_cached()
 
-    item_list = [
-        {"id": int(row["id"]), "name": row["name"]}
-        for row in items_df.to_dict(orient="records")
-    ]
+    item_list = []
+    for row in items_df.to_dict(orient="records"):
+        name = row["name"]
+        item_list.append({
+            "id": int(row["id"]),
+            "name": name,
+            "norm": normalize_text(name),
+        })
+
+    query = st.text_input("🔎 Buscar item", placeholder="Ex: edic, pocao, acao...").lower()
+    query_norm = normalize_text(query)
+
+    filtered_items = (
+        [it for it in item_list if query_norm in it["norm"]]
+        if query_norm
+        else item_list
+    )
+
+
 
     # Descobre item padrão (último que teve preço registrado)
-    selectbox_kwargs: dict = {}
+    default_item_id = None
     if not df_prices_all.empty:
         df_tmp = df_prices_all.copy()
         df_tmp["date_parsed"] = pd.to_datetime(df_tmp["date"])
         last_row = df_tmp.sort_values("date_parsed", ascending=False).iloc[0]
         default_item_id = int(last_row["item_id"])
 
-        default_index = 0
-        for i, it in enumerate(item_list):
+    selectbox_kwargs: dict = {}
+
+    # Se o filtro zerou a lista, avisa e sai
+    if not filtered_items:
+        st.warning("Nenhum item encontrado para esse termo de busca.")
+        return
+
+    # Se temos item padrão e ele aparece na lista filtrada, posiciona nele
+    if default_item_id is not None:
+        for i, it in enumerate(filtered_items):
             if it["id"] == default_item_id:
-                default_index = i
+                selectbox_kwargs["index"] = i
                 break
-        selectbox_kwargs["index"] = default_index
-    else:
-        selectbox_kwargs["index"] = None
-        selectbox_kwargs["placeholder"] = "Selecione um item..."
+    # Se não achou, deixamos sem 'index' e o selectbox usa o primeiro item da lista
+
 
     # ------------------------------
     #  Estado global simples
@@ -402,11 +434,12 @@ def render():
 
     with col_item:
         item_selected = st.selectbox(
-            "Item",
-            options=item_list,
-            format_func=lambda it: f"{it['name']} ({it['id']})",
-            **selectbox_kwargs,
-        )
+        "Item",
+        options=filtered_items,
+        format_func=lambda it: f"{it['name']} ({it['id']})",
+        **selectbox_kwargs,
+    )
+
 
     if item_selected is None:
         st.info("Escolha um item para começar.")
