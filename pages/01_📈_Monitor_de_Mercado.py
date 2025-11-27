@@ -20,9 +20,66 @@ from services.market import compute_summary
 apply_theme("Monitor de Mercado – Ragnarok LATAM", page_icon="📈")
 
 # ============================================
-#  Helpers
+#  Login simples do clã (senha única)
+# ============================================
+# def check_clan_login() -> bool:
+#     if "auth_ok" in st.session_state and st.session_state["auth_ok"]:
+#         return True
+
+#     st.markdown("### 🔒 Acesso restrito ao clã")
+#     pwd = st.text_input("Senha do clã", type="password")
+#     ok = st.button("Entrar")
+
+#     if ok:
+#         try:
+#             clan_pwd = st.secrets["auth"]["clan_password"]
+#         except Exception:
+#             st.error("Configuração de senha não encontrada em secrets.toml.")
+#             return False
+
+#         if pwd == clan_pwd:
+#             st.session_state["auth_ok"] = True
+#             st.success("Acesso liberado!")
+#             st.rerun()
+#         else:
+#             st.error("Senha incorreta.")
+
+#     return False
+
+
+# if not check_clan_login():
+#     st.stop()
+
+# ============================================
+#  Cache de dados
 # ============================================
 
+@st.cache_data(ttl=30, show_spinner=False)
+def get_items_cached() -> pd.DataFrame:
+    return get_items_df()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_all_prices_cached() -> pd.DataFrame:
+    return get_all_prices_df()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_price_history_cached(item_id: int) -> pd.DataFrame:
+    return get_price_history_df(item_id)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_global_summary_cached() -> pd.DataFrame:
+    df_prices_all = get_all_prices_cached()
+    if df_prices_all.empty:
+        return pd.DataFrame()
+    df_summary_input = df_prices_all.rename(columns={"item_name": "item"})
+    return compute_summary(df_summary_input)
+
+# ============================================
+#  Helpers
+# ============================================
 
 def fmt_zeny(v: float | int | None) -> str:
     if v is None or pd.isna(v):
@@ -67,7 +124,6 @@ def style_market_table(df: pd.DataFrame):
 
     styler = df.style
 
-    # tenta achar a coluna de variação por nome
     var_cols = []
     if "Variação % vs média 5" in df.columns:
         var_cols.append("Variação % vs média 5")
@@ -82,8 +138,6 @@ def style_market_table(df: pd.DataFrame):
 
     return styler
 
-
-
 # ============================================
 #  Página principal
 # ============================================
@@ -93,16 +147,15 @@ def render():
     st.title("📈 Monitor de Mercado – Ragnarok LATAM")
 
     # ------------------------------
-    #  Carrega itens e preços
+    #  Carrega itens e preços (COM CACHE)
     # ------------------------------
-    items_df = get_items_df()
+    items_df = get_items_cached()
     if items_df.empty:
         st.warning("Nenhum item encontrado. Verifique o arquivo items.json.")
         return
 
-    df_prices_all = get_all_prices_df()
+    df_prices_all = get_all_prices_cached()
 
-    # Monta lista para o selectbox
     item_list = [
         {"id": int(row["id"]), "name": row["name"]}
         for row in items_df.to_dict(orient="records")
@@ -154,7 +207,6 @@ def render():
             **selectbox_kwargs,
         )
 
-    # Se ainda não escolheu nada (primeiro uso, sem histórico)
     if item_selected is None:
         st.info("Escolha um item para começar.")
         return
@@ -172,17 +224,14 @@ def render():
     if "flash_message" not in st.session_state:
         st.session_state["flash_message"] = ""
 
-    # Limpeza pós-salvar
     if st.session_state["clear_price"]:
         st.session_state["price_input"] = ""
         st.session_state["clear_price"] = False
 
-    # Se mudou de item, limpa o campo
     if item_id != st.session_state["last_item_id"]:
         st.session_state["price_input"] = ""
         st.session_state["last_item_id"] = item_id
 
-    # Mensagem de sucesso, se houver
     if st.session_state["flash_message"]:
         st.success(st.session_state["flash_message"])
         st.session_state["flash_message"] = ""
@@ -198,7 +247,6 @@ def render():
         )
 
     with col_btn:
-        # empurra o botão para alinhar com os campos
         st.markdown("<div style='height: 1.7em;'></div>", unsafe_allow_html=True)
         save_clicked = st.button("Salvar", use_container_width=True)
 
@@ -213,6 +261,12 @@ def render():
                     st.warning("Informe um preço maior que zero.")
                 else:
                     insert_price(item_id, sel_date.isoformat(), price_val)
+
+                    # limpa caches relacionados
+                    get_all_prices_cached.clear()
+                    get_global_summary_cached.clear()
+                    get_price_history_cached.clear()
+
                     st.session_state["clear_price"] = True
                     st.session_state["flash_message"] = "Preço salvo com sucesso!"
                     st.rerun()
@@ -226,9 +280,7 @@ def render():
     # ======================================================
     #  KPIs do item selecionado
     # ======================================================
-
-    # Histórico do item para uso geral
-    hist_local_raw = get_price_history_df(item_id)
+    hist_local_raw = get_price_history_cached(item_id)
     if not hist_local_raw.empty:
         hist_local = hist_local_raw.copy()
         hist_local["date"] = pd.to_datetime(hist_local["date"])
@@ -236,16 +288,13 @@ def render():
     else:
         hist_local = pd.DataFrame()
 
-    df_prices_all_summary = get_all_prices_df()
+    df_sum_global = get_global_summary_cached()
     kpi_cols = st.columns(4)
 
     last_price = mean_5 = var_pct = None
     status = "-"
 
-    if not df_prices_all_summary.empty:
-        df_summary_input = df_prices_all_summary.rename(columns={"item_name": "item"})
-        df_sum_global = compute_summary(df_summary_input)
-
+    if not df_sum_global.empty:
         item_summary = df_sum_global[df_sum_global["Item"] == item_name]
         if not item_summary.empty:
             row = item_summary.iloc[0]
@@ -266,7 +315,6 @@ def render():
 
             status = str(row.get("Status", "-"))
 
-    # Renderiza KPIs
     labels = [
         "Último preço (zeny)",
         "Média últimos 5 dias",
@@ -292,7 +340,6 @@ def render():
                 unsafe_allow_html=True,
             )
 
-    # pequeno respiro antes dos insights
     st.markdown("<div style='margin-top: 0.75rem;'></div>", unsafe_allow_html=True)
 
     # ======================================================
@@ -312,7 +359,6 @@ def render():
     if hist_local.empty:
         st.info("Ainda não há dados suficientes para gerar insights para este item.")
     else:
-        # Trabalha só com os últimos 5 registros
         hist_last5 = hist_local.tail(5)
         prices_5 = hist_last5["price_zeny"]
 
@@ -320,18 +366,13 @@ def render():
         max_5 = float(prices_5.max())
         media_5 = float(prices_5.mean())
 
-        # Oscilação = (máx - mín) / média
         osc_pct = 0.0
         if media_5 > 0:
             osc_pct = (max_5 - min_5) / media_5 * 100
 
-        # Desvio padrão nos últimos 5
         std_5 = float(prices_5.std())
-
-        # Preço atual = último registro
         preco_atual = float(prices_5.iloc[-1])
 
-        # Texto de interpretação simples
         if media_5 > 0:
             diff_media_pct = (preco_atual - media_5) / media_5 * 100
         else:
@@ -353,12 +394,8 @@ def render():
             f"dos últimos 5 registros — {msg_text}"
         )
 
-        # ---- Layout: blocos numéricos à esquerda + gráfico à direita ----
         col_left, col_right = st.columns([1.15, 1.1])
 
-        # -------------------------
-        # Bloco numérico (esquerda)
-        # -------------------------
         with col_left:
             col_a, col_b = st.columns(2)
 
@@ -400,13 +437,9 @@ def render():
                     unsafe_allow_html=True,
                 )
 
-        # -------------------------
-        # Gráfico de tendência (direita)
-        # -------------------------
         with col_right:
             st.markdown("**Tendência (últimos 5 registros)**")
 
-            # Ajusta domínio do eixo Y para ficar colado nos valores
             y_min = float(min_5) * 0.98
             y_max = float(max_5) * 1.02
 
@@ -436,7 +469,6 @@ def render():
 
             st.altair_chart(spark, use_container_width=True)
 
-        # Veredito destacado logo abaixo dos números
         st.markdown(
             f"""
             <div style="
@@ -456,7 +488,7 @@ def render():
     st.markdown("---")
 
     # ======================================================
-    #  Histórico de preços (com filtro de período)
+    #  Histórico de preços
     # ======================================================
 
     st.subheader(f"📈 Histórico de preços – {item_name}")
@@ -464,7 +496,6 @@ def render():
     if hist_local.empty:
         st.info("Ainda não há histórico para este item.")
     else:
-        # Filtro de período
         st.caption("Período do gráfico")
         periodo = st.radio(
             "",
@@ -510,7 +541,6 @@ def render():
 
         st.altair_chart(area + line, use_container_width=True)
 
-        # --------- Tabela de histórico ---------
         st.subheader("📜 Tabela de histórico")
 
         hist_display = hist_local.copy()
@@ -524,9 +554,8 @@ def render():
             hist_display.sort_values("Data", ascending=False).reset_index(drop=True),
             use_container_width=True,
             hide_index=True,
-            height=400,  # 👈 altura fixa, o extra vira scroll interno
+            height=400,
         )
-
 
     st.markdown("---")
 
@@ -544,14 +573,10 @@ def render():
         unsafe_allow_html=True,
     )
 
-    df_prices_all_for_sum = get_all_prices_df()
-    if df_prices_all_for_sum.empty:
+    df_sum_all = get_global_summary_cached()
+    if df_sum_all.empty:
         st.info("Ainda não há dados suficientes para montar o ranking.")
     else:
-        df_sum_all = compute_summary(
-            df_prices_all_for_sum.rename(columns={"item_name": "item"})
-        )
-
         top_gain = (
             df_sum_all.sort_values("Variação % vs média 5", ascending=False)
             .head(5)
@@ -570,8 +595,6 @@ def render():
             df["Variação % vs média 5"] = df["Variação % vs média 5"].apply(
                 lambda x: fmt_pct(x * 100.0 if abs(x) < 1.0 else x)
             )
-
-            # rótulos mais curtos pra caber melhor em telas menores
             df = df.rename(
                 columns={
                     "Último preço (zeny)": "Últ. preço",
@@ -579,7 +602,6 @@ def render():
                     "Variação % vs média 5": "Var % vs 5d",
                 }
             )
-
             return df[
                 [
                     "Item",
@@ -602,7 +624,6 @@ def render():
                 height=260,
             )
 
-
         with tab_down:
             df_down = prepare_top(top_loss)
             st.dataframe(
@@ -612,7 +633,6 @@ def render():
                 height=260,
             )
 
-
     st.markdown("---")
 
     # ======================================================
@@ -621,44 +641,37 @@ def render():
 
     st.subheader("🌐 Resumo geral do mercado")
 
-    df_prices_all_summary2 = get_all_prices_df()
-    if df_prices_all_summary2.empty:
+    df_sum = get_global_summary_cached()
+    if df_sum.empty:
         st.info("Ainda não há dados suficientes para montar o resumo.")
-    else:
-        df_summary_input2 = df_prices_all_summary2.rename(columns={"item_name": "item"})
-        df_sum = compute_summary(df_summary_input2)
+        return
 
-        if df_sum.empty:
-            st.info("Ainda não há dados suficientes para montar o resumo.")
-            return
+    df_display = df_sum.copy()
+    df_display["Último preço (zeny)"] = df_display["Último preço (zeny)"].apply(
+        fmt_zeny
+    )
+    df_display["Média últimos 5"] = df_display["Média últimos 5"].apply(fmt_zeny)
+    df_display["Variação % vs média 5"] = df_display["Variação % vs média 5"].apply(
+        lambda x: fmt_pct(x * 100.0 if abs(x) < 1.0 else x)
+    )
 
-        df_display = df_sum.copy()
-        df_display["Último preço (zeny)"] = df_display["Último preço (zeny)"].apply(
-            fmt_zeny
-        )
-        df_display["Média últimos 5"] = df_display["Média últimos 5"].apply(fmt_zeny)
-        df_display["Variação % vs média 5"] = df_display["Variação % vs média 5"].apply(
-            lambda x: fmt_pct(x * 100.0 if abs(x) < 1.0 else x)
-        )
-
-        df_display = df_display[
-            [
-                "Item",
-                "Última data",
-                "Último preço (zeny)",
-                "Média últimos 5",
-                "Variação % vs média 5",
-                "Status",
-            ]
+    df_display = df_display[
+        [
+            "Item",
+            "Última data",
+            "Último preço (zeny)",
+            "Média últimos 5",
+            "Variação % vs média 5",
+            "Status",
         ]
+    ]
 
-        st.dataframe(
-            style_market_table(df_display),
-            use_container_width=True,
-            hide_index=True,
-            height=450,  # ajusta se quiser maior/menor
-        )
-
+    st.dataframe(
+        style_market_table(df_display),
+        use_container_width=True,
+        hide_index=True,
+        height=450,
+    )
 
 
 render()
