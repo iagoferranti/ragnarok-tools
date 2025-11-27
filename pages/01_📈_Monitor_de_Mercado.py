@@ -11,7 +11,15 @@ from db.database import (
     insert_price,
     get_price_history_df,
     get_all_prices_df,
+    get_existing_price,
+    update_price,
+    create_price_change_request,
+    log_price_change,
+    log_price_action,
+    get_pending_requests,
 )
+
+
 from services.market import compute_summary
 
 # ============================================
@@ -19,36 +27,12 @@ from services.market import compute_summary
 # ============================================
 apply_theme("Monitor de Mercado – Ragnarok LATAM", page_icon="📈")
 
-# ============================================
-#  Login simples do clã (senha única)
-# ============================================
-# def check_clan_login() -> bool:
-#     if "auth_ok" in st.session_state and st.session_state["auth_ok"]:
-#         return True
+def is_admin() -> bool:
+    """Retorna True se o usuário logado estiver na lista de admins."""
+    username = st.session_state.get("username", "")
+    admins = st.secrets["roles"]["admins"]
+    return username in admins
 
-#     st.markdown("### 🔒 Acesso restrito ao clã")
-#     pwd = st.text_input("Senha do clã", type="password")
-#     ok = st.button("Entrar")
-
-#     if ok:
-#         try:
-#             clan_pwd = st.secrets["auth"]["clan_password"]
-#         except Exception:
-#             st.error("Configuração de senha não encontrada em secrets.toml.")
-#             return False
-
-#         if pwd == clan_pwd:
-#             st.session_state["auth_ok"] = True
-#             st.success("Acesso liberado!")
-#             st.rerun()
-#         else:
-#             st.error("Senha incorreta.")
-
-#     return False
-
-
-# if not check_clan_login():
-#     st.stop()
 
 # ============================================
 #  Cache de dados
@@ -120,6 +104,8 @@ def style_market_table(df: pd.DataFrame):
     def color_status(val):
         if isinstance(val, str) and val.lower() == "vender":
             return "color:#ef4444;"
+        if isinstance(val, str) and val.lower() == "comprar":
+            return "color:#22c55e;"
         return ""
 
     styler = df.style
@@ -141,10 +127,77 @@ def style_market_table(df: pd.DataFrame):
 # ============================================
 #  Página principal
 # ============================================
-
-
 def render():
+    
+    if not st.session_state.get("auth_ok", False):
+        st.warning("Você não está autenticado. Faça login para continuar.")
+        st.stop()
+
     st.title("📈 Monitor de Mercado – Ragnarok LATAM")
+
+    ss = st.session_state
+
+    # ---------------------------------------
+    # Barra superior: usuário logado + sininho (se admin)
+    # ---------------------------------------
+    user_display = ss.get("user_email") or ss.get("username") or "desconhecido"
+
+    col_user, col_notif = st.columns([4, 1])
+
+    with col_user:
+        st.markdown(
+            f"""
+            <div style="
+                margin-bottom: 0.75rem;
+                padding: 0.4rem 0.75rem;
+                border-radius: 0.6rem;
+                font-size: 0.9rem;
+                background-color: rgba(15,23,42,0.85);
+                border: 1px solid rgba(148,163,184,0.4);
+                display: inline-flex;
+                align-items: center;
+                gap: 0.4rem;
+            ">
+                <span>👤</span>
+                <span>Logado como <strong>{user_display}</strong></span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col_notif:
+        if is_admin():
+            try:
+                df_req = get_pending_requests()
+                n_pending = len(df_req)
+            except Exception as e:
+                print(f"[WARN] Falha ao carregar pending_requests: {e}")
+                n_pending = 0
+
+            if n_pending > 0:
+                label = f"🔔 {n_pending}"
+                help_txt = "Ver solicitações de alteração pendentes"
+                disabled = False
+            else:
+                label = "🔔 0"
+                help_txt = "Nenhuma solicitação pendente"
+                disabled = True
+
+            # 👇 sem callback; navegação feita no if
+            notif_clicked = st.button(
+                label,
+                key="btn_admin_requests",
+                help=help_txt,
+                disabled=disabled,
+            )
+
+            if notif_clicked and not disabled:
+                st.switch_page("pages/02_🛠️_Admin_Solicitações.py")
+        else:
+            st.empty()
+
+
+
 
     # ------------------------------
     #  Carrega itens e preços (COM CACHE)
@@ -180,6 +233,152 @@ def render():
         selectbox_kwargs["placeholder"] = "Selecione um item..."
 
     # ------------------------------
+    #  Estado global simples
+    # ------------------------------
+    if "price_input" not in ss:
+        ss["price_input"] = ""
+    if "last_item_id" not in ss:
+        ss["last_item_id"] = None
+    if "clear_price" not in ss:
+        ss["clear_price"] = False
+    if "flash_message" not in ss:
+        ss["flash_message"] = ""
+    if "flash_type" not in ss:
+        ss["flash_type"] = "success"
+    if "pending_update" not in ss:
+        ss["pending_update"] = None
+    if "price_action" not in ss:
+        ss["price_action"] = None  # "confirm_update" | "cancel_update" | None
+
+    # ------------------------------
+    #  Processa ações pendentes (confirmar/cancelar update)
+    #  -> isso roda ANTES de desenhar os botões, então não tem duplicação
+    # ------------------------------
+    
+    # ======================================================
+    #  Ação pós-clique (confirmar / cancelar atualização)
+    # ======================================================
+    action = ss.get("price_action")
+
+    if action == "confirm_update":
+        pending = ss.get("pending_update")
+        if pending is not None:
+            admin_flag = is_admin()  # usa a função que olha secrets
+            user_id = (
+                ss.get("user_email")   # se tiver email, usa
+                or ss.get("username")  # senão usa o username
+                or "desconhecido"
+            )
+
+            if admin_flag:
+                # 👑 ADMIN: atualiza direto
+                update_price(
+                    pending["item_id"],
+                    pending["date_str"],
+                    pending["new_price"],
+                )
+
+                # Log técnico de alteração (tabela macro)
+                try:
+                    log_price_change(
+                        item_id=pending["item_id"],
+                        date_str=pending["date_str"],
+                        old_price_zeny=pending["existing_price"],
+                        new_price_zeny=pending["new_price"],
+                        changed_by=user_id,
+                        source="DIRECT_ADMIN",
+                    )
+                except Exception as e:
+                    print(f"[WARN] Falha ao logar alteração de preço: {e}")
+
+                # 🔒 Log de auditoria fina (price_audit_log)
+                try:
+                    log_price_action(
+                        item_id=pending["item_id"],
+                        date_str=pending["date_str"],
+                        action_type="update",
+                        actor_email=user_id,
+                        actor_role="admin",
+                        old_price=pending["existing_price"],
+                        new_price=pending["new_price"],
+                        request_id=None,
+                    )
+                except Exception as e:
+                    print(f"[WARN] Falha ao logar ação de update em price_audit_log: {e}")
+
+
+                # limpa caches relacionados
+                get_all_prices_cached.clear()
+                get_global_summary_cached.clear()
+                get_price_history_cached.clear()
+
+                ss["clear_price"] = True
+                ss["flash_message"] = "Preço atualizado com sucesso!"
+                ss["flash_type"] = "success"
+                ss["pending_update"] = None
+                ss["price_action"] = None
+                st.rerun()
+
+            else:
+                # 🙋 Usuário normal: cria SOLICITAÇÃO para admin
+                try:
+                    print("\n===== DEBUG: Enviando solicitação =====")
+                    print(f"item_id: {pending['item_id']}")
+                    print(f"date: {pending['date_str']}")
+                    print(f"old_price: {pending['existing_price']}")
+                    print(f"new_price: {pending['new_price']}")
+                    print(f"user: {user_id}")
+                    print("========================================\n")
+
+                    # chamada POSICIONAL, sem keywords
+                    req_id = create_price_change_request(
+                        pending["item_id"],          # item_id
+                        pending["date_str"],         # date_str
+                        pending["existing_price"],   # old_price_zeny
+                        pending["new_price"],        # new_price_zeny
+                        user_id,                     # requested_by
+                        None,                        # reason
+                    )
+
+                    print(f"===== DEBUG: Solicitação criada com id={req_id} =====")
+
+                    ss["flash_message"] = (
+                        "Solicitação de alteração enviada para os administradores."
+                    )
+                    ss["flash_type"] = "info"
+
+                except Exception as e:
+                    print("\n===== DEBUG ERROR =====")
+                    print("Erro no envio da solicitação:")
+                    print(e)
+                    print("Tipo:", type(e))
+                    print("========================\n")
+
+                    ss["flash_message"] = (
+                        "Não foi possível enviar a solicitação. "
+                        "Tente novamente mais tarde ou fale com um admin."
+                    )
+                    ss["flash_type"] = "warning"
+
+                ss["pending_update"] = None
+                ss["price_action"] = None
+                st.rerun()
+
+    elif action == "cancel_update":
+        # CANCELAR: só limpa o estado e mostra mensagem
+        ss["pending_update"] = None
+        ss["flash_message"] = (
+            "Atualização cancelada. Nenhuma alteração foi feita."
+        )
+        ss["flash_type"] = "info"
+        ss["price_action"] = None
+        st.rerun()
+
+    st.markdown("---")
+
+
+
+        # ------------------------------
     #  Card de registro diário
     # ------------------------------
     st.markdown(
@@ -197,7 +396,8 @@ def render():
         unsafe_allow_html=True,
     )
 
-    col_item, col_date, col_price, col_btn = st.columns([3, 2, 2, 1])
+    # Linha 1 – seleção do item (fora do form)
+    col_item, _, _, _ = st.columns([3, 2, 2, 1])
 
     with col_item:
         item_selected = st.selectbox(
@@ -214,42 +414,55 @@ def render():
     item_id = item_selected["id"]
     item_name = item_selected["name"]
 
-    # ---- Estado do input de preço ----
-    if "price_input" not in st.session_state:
-        st.session_state["price_input"] = ""
-    if "last_item_id" not in st.session_state:
-        st.session_state["last_item_id"] = item_id
-    if "clear_price" not in st.session_state:
-        st.session_state["clear_price"] = False
-    if "flash_message" not in st.session_state:
-        st.session_state["flash_message"] = ""
+    # Limpa input se precisou ou mudou de item
+    if ss["clear_price"]:
+        ss["price_input"] = ""
+        ss["clear_price"] = False
 
-    if st.session_state["clear_price"]:
-        st.session_state["price_input"] = ""
-        st.session_state["clear_price"] = False
+    if item_id != ss["last_item_id"]:
+        ss["price_input"] = ""
+        ss["last_item_id"] = item_id
 
-    if item_id != st.session_state["last_item_id"]:
-        st.session_state["price_input"] = ""
-        st.session_state["last_item_id"] = item_id
+    # Flash message (sucesso / info após insert/update/cancel)
+    if ss["flash_message"]:
+        level = ss.get("flash_type", "success")
+        msg = ss["flash_message"]
 
-    if st.session_state["flash_message"]:
-        st.success(st.session_state["flash_message"])
-        st.session_state["flash_message"] = ""
+        if level == "success":
+            st.success(msg)
+        elif level == "info":
+            st.info(msg)
+        elif level == "warning":
+            st.warning(msg)
+        else:
+            st.write(msg)
 
-    with col_date:
-        sel_date = st.date_input("Data", value=date.today())
+        ss["flash_message"] = ""
+        ss["flash_type"] = "success"
 
-    with col_price:
-        price_str = st.text_input(
-            "Preço (zeny)",
-            key="price_input",
-            placeholder="Ex: 650.000",
-        )
+    # Linha 2 – formulário (Enter dispara o submit)
+    with st.form(key=f"form_registro_preco_{item_id}"):
+        form_col_date, form_col_price, form_col_btn = st.columns([2, 2, 1])
 
-    with col_btn:
-        st.markdown("<div style='height: 1.7em;'></div>", unsafe_allow_html=True)
-        save_clicked = st.button("Salvar", use_container_width=True)
+        with form_col_date:
+            sel_date = st.date_input(
+                "Data",
+                value=date.today(),
+                key=f"date_input_{item_id}",
+            )
 
+        with form_col_price:
+            price_str = st.text_input(
+                "Preço (zeny)",
+                key="price_input",
+                placeholder="Ex: 650.000 ou 600000",
+            )
+
+        with form_col_btn:
+            st.write("")
+            save_clicked = st.form_submit_button("Salvar", use_container_width=True)
+
+    # Clique no salvar → decide entre INSERT ou fluxo de confirmação
     if save_clicked:
         if not price_str.strip():
             st.warning("Informe um preço.")
@@ -257,25 +470,92 @@ def render():
             normalized = price_str.replace(".", "").replace(",", "")
             try:
                 price_val = int(normalized)
+
                 if price_val <= 0:
                     st.warning("Informe um preço maior que zero.")
-                else:
-                    insert_price(item_id, sel_date.isoformat(), price_val)
+                    return
 
-                    # limpa caches relacionados
+                # Bloqueia data futura antes de consultar o banco
+                if sel_date > date.today():
+                    st.warning("Não é permitido registrar preço em data futura.")
+                    return
+
+                date_str = sel_date.isoformat()
+                existing_price = get_existing_price(item_id, date_str)
+
+                if existing_price is None:
+                    # Não existe registro → insere direto
+                    insert_price(item_id, date_str, price_val)
+
                     get_all_prices_cached.clear()
                     get_global_summary_cached.clear()
                     get_price_history_cached.clear()
 
-                    st.session_state["clear_price"] = True
-                    st.session_state["flash_message"] = "Preço salvo com sucesso!"
+                    ss["clear_price"] = True
+                    ss["flash_message"] = "Preço salvo com sucesso!"
+                    ss["flash_type"] = "success"
+                    ss["pending_update"] = None
                     st.rerun()
+
+                else:
+                    # Já existe → abre fluxo de atualização
+                    ss["pending_update"] = {
+                        "item_id": item_id,
+                        "item_name": item_name,
+                        "date_str": date_str,
+                        "existing_price": existing_price,
+                        "new_price": price_val,
+                    }
+                    st.warning(
+                        "Já existe um preço cadastrado para este item nesta data. "
+                        "Confira abaixo antes de confirmar a atualização."
+                    )
+
             except ValueError:
                 st.warning(
                     "Preço inválido. Use apenas números (ex: 650000, 650.000 ou 650,000)."
                 )
 
+    pending = ss.get("pending_update")
+
+    if pending is not None:
+        st.info(
+            f"Para **{pending['item_name']}** em **{pending['date_str']}**:\n\n"
+            f"- Preço atual: **{fmt_zeny(pending['existing_price'])} zeny**\n"
+            f"- Novo preço: **{fmt_zeny(pending['new_price'])} zeny**"
+        )
+
+        col_confirm, col_cancel = st.columns([1, 1])
+
+        if is_admin():
+            # 👑 Admin confirma e aplica direto
+            col_confirm.button(
+                "✅ Atualizar preço do dia",
+                key="btn_confirm_update",
+                use_container_width=True,
+                on_click=lambda: ss.update(price_action="confirm_update"),
+            )
+        else:
+            # 🙋 Usuário normal: envia solicitação para admin
+            col_confirm.button(
+                "♻️ Enviar solicitação para admin",
+                key="btn_request_change",
+                use_container_width=True,
+                on_click=lambda: ss.update(price_action="confirm_update"),
+            )
+
+        # Todos podem cancelar
+        col_cancel.button(
+            "❌ Cancelar atualização",
+            key="btn_cancel_update",
+            use_container_width=True,
+            on_click=lambda: ss.update(price_action="cancel_update"),
+        )
+
+
+
     st.markdown("---")
+
 
     # ======================================================
     #  KPIs do item selecionado
@@ -345,7 +625,6 @@ def render():
     # ======================================================
     #  Painel de insights do item
     # ======================================================
-
     st.markdown(
         """
         <div class="section-title">
@@ -490,7 +769,6 @@ def render():
     # ======================================================
     #  Histórico de preços
     # ======================================================
-
     st.subheader(f"📈 Histórico de preços – {item_name}")
 
     if hist_local.empty:
@@ -562,7 +840,6 @@ def render():
     # ======================================================
     #  Top 5 maiores altas / quedas
     # ======================================================
-
     st.markdown(
         """
         <div class="section-title">
@@ -621,7 +898,7 @@ def render():
                 style_market_table(df_up),
                 use_container_width=True,
                 hide_index=True,
-                height=260,
+                height=230,
             )
 
         with tab_down:
@@ -630,7 +907,7 @@ def render():
                 style_market_table(df_down),
                 use_container_width=True,
                 hide_index=True,
-                height=260,
+                height=230,
             )
 
     st.markdown("---")
@@ -638,7 +915,6 @@ def render():
     # ======================================================
     #  Resumo geral do mercado
     # ======================================================
-
     st.subheader("🌐 Resumo geral do mercado")
 
     df_sum = get_global_summary_cached()
