@@ -197,3 +197,8 @@ button[kind="primary"]:hover {
 hr {
     border-color: rgba(148,163,184,0.2) !important;
 }
+
+/* === Esconde o título de grupo "app" no menu lateral === */
+[data-testid="stSidebarNav"] > div:nth-child(1) {
+    display: none !important;
+}
