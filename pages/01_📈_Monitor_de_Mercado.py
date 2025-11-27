@@ -208,64 +208,7 @@ def render():
         else:
             st.empty()
 
-
-
-
-    # ------------------------------
-    #  Carrega itens e preços (COM CACHE)
-    # ------------------------------
-    items_df = get_items_cached()
-    if items_df.empty:
-        st.warning("Nenhum item encontrado. Verifique o arquivo items.json.")
-        return
-
-    df_prices_all = get_all_prices_cached()
-
-    item_list = []
-    for row in items_df.to_dict(orient="records"):
-        name = row["name"]
-        item_list.append({
-            "id": int(row["id"]),
-            "name": name,
-            "norm": normalize_text(name),
-        })
-
-    query = st.text_input("🔎 Buscar item", placeholder="Ex: edic, pocao, acao...").lower()
-    query_norm = normalize_text(query)
-
-    filtered_items = (
-        [it for it in item_list if query_norm in it["norm"]]
-        if query_norm
-        else item_list
-    )
-
-
-
-    # Descobre item padrão (último que teve preço registrado)
-    default_item_id = None
-    if not df_prices_all.empty:
-        df_tmp = df_prices_all.copy()
-        df_tmp["date_parsed"] = pd.to_datetime(df_tmp["date"])
-        last_row = df_tmp.sort_values("date_parsed", ascending=False).iloc[0]
-        default_item_id = int(last_row["item_id"])
-
-    selectbox_kwargs: dict = {}
-
-    # Se o filtro zerou a lista, avisa e sai
-    if not filtered_items:
-        st.warning("Nenhum item encontrado para esse termo de busca.")
-        return
-
-    # Se temos item padrão e ele aparece na lista filtrada, posiciona nele
-    if default_item_id is not None:
-        for i, it in enumerate(filtered_items):
-            if it["id"] == default_item_id:
-                selectbox_kwargs["index"] = i
-                break
-    # Se não achou, deixamos sem 'index' e o selectbox usa o primeiro item da lista
-
-
-    # ------------------------------
+        # ------------------------------
     #  Estado global simples
     # ------------------------------
     if "price_input" not in ss:
@@ -282,6 +225,67 @@ def render():
         ss["pending_update"] = None
     if "price_action" not in ss:
         ss["price_action"] = None  # "confirm_update" | "cancel_update" | None
+
+    # ------------------------------
+    #  Carrega itens e preços (COM CACHE)
+    # ------------------------------
+    items_df = get_items_cached()
+    if items_df.empty:
+        st.warning("Nenhum item encontrado. Verifique o arquivo items.json.")
+        return
+
+    df_prices_all = get_all_prices_cached()
+
+    # Monta lista de itens já normalizada para busca sem acento
+    item_list: list[dict] = []
+    for row in items_df.to_dict(orient="records"):
+        name = row["name"]
+        item_list.append(
+            {
+                "id": int(row["id"]),
+                "name": name,
+                "norm": normalize_text(name),
+            }
+        )
+
+    # Campo de busca (sem acento / case-insensitive)
+    query = st.text_input(
+        "🔎 Buscar item",
+        placeholder="Ex: edic, pocao, acao...",
+    )
+    query_norm = normalize_text(query) if query else ""
+
+    # Aplica filtro sobre o nome normalizado
+    if query_norm:
+        filtered_items = [it for it in item_list if query_norm in it["norm"]]
+    else:
+        filtered_items = item_list
+
+    if not filtered_items:
+        st.warning("Nenhum item encontrado para esse termo de busca.")
+        return
+
+    # Define item padrão
+    selectbox_kwargs: dict = {}
+
+    if query_norm:
+        # Quando o usuário está filtrando, sempre começa no primeiro resultado
+        selectbox_kwargs["index"] = 0
+    else:
+        # Sem filtro: usa o último item que teve preço registrado
+        default_item_id = None
+        if not df_prices_all.empty:
+            df_tmp = df_prices_all.copy()
+            df_tmp["date_parsed"] = pd.to_datetime(df_tmp["date"])
+            last_row = df_tmp.sort_values("date_parsed", ascending=False).iloc[0]
+            default_item_id = int(last_row["item_id"])
+
+        if default_item_id is not None:
+            for i, it in enumerate(filtered_items):
+                if it["id"] == default_item_id:
+                    selectbox_kwargs["index"] = i
+                    break
+
 
     # ------------------------------
     #  Processa ações pendentes (confirmar/cancelar update)
