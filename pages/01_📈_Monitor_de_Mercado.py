@@ -141,8 +141,13 @@ def style_market_table(df: pd.DataFrame):
 # ============================================
 def render():
     # --- Modo demo via query string (?demo=1) ---
-    demo_param = st.query_params.get("demo")
-    demo_mode = demo_param == "1"
+    raw_demo = st.query_params.get("demo", None)
+
+    # st.query_params pode retornar "1" ou ["1"]
+    if isinstance(raw_demo, list):
+        raw_demo = raw_demo[0]
+
+    demo_mode = (raw_demo == "1")
 
     ss = st.session_state
 
