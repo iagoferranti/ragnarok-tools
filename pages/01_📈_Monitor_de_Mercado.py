@@ -140,13 +140,20 @@ def style_market_table(df: pd.DataFrame):
 #  Página principal
 # ============================================
 def render():
-    if not st.session_state.get("auth_ok", False):
+    # --- Modo demo via query string (?demo=1) ---
+    demo_param = st.query_params.get("demo")
+    demo_mode = demo_param == "1"
+
+    ss = st.session_state
+
+    ss["demo_mode"] = demo_mode  # sempre atualiza
+
+    # Se NÃO for demo, exige autenticação normal
+    if not demo_mode and not ss.get("auth_ok", False):
         st.warning("Você não está autenticado. Faça login para continuar.")
         st.stop()
 
     st.title("📈 Monitor de Mercado – Ragnarok LATAM")
-
-    ss = st.session_state
 
     if "is_saving" not in ss:
         ss["is_saving"] = False
@@ -186,8 +193,6 @@ def render():
             unsafe_allow_html=True,
         )
 
-
-
     # ------------------------------
     #  Estado global simples
     # ------------------------------
@@ -209,7 +214,10 @@ def render():
     # ---------------------------------------
     # Barra superior: usuário logado + sininho (se admin)
     # ---------------------------------------
-    user_display = ss.get("user_email") or ss.get("username") or "desconhecido"
+    if demo_mode:
+        user_display = "Modo Demo (sem login)"
+    else:
+        user_display = ss.get("user_email") or ss.get("username") or "desconhecido"
 
     col_user, col_notif = st.columns([4, 1])
 
@@ -294,120 +302,156 @@ def render():
             }
         )
 
-    # ------------------------------------------------------
-    #  BUSCA: campo + botão "Buscar"
-    # ------------------------------------------------------
-    col_search, col_btn_search = st.columns([4, 1])
-
-    with col_search:
-        query = st.text_input(
-            "🔎 Buscar item",
-            placeholder="Ex: edic, pocao, poçao, poção...",
-            key="search_item",
-        )
-
-    with col_btn_search:
-        st.markdown("<div style='height: 1.75rem'></div>", unsafe_allow_html=True)
-        st.button(
-            "Buscar",
-            key="btn_search_item",
-            use_container_width=True,
-            help="Clique aqui ou pressione Enter após digitar para buscar o item",
-        )
-
-    query_norm = normalize_text(query)
-
-    filtered_items = item_list
+    # ======================================================
+    #  MODO DEMO: item fixo, sem busca
+    # ======================================================
     item_selected = None
 
-    if query_norm:
-        starts = [it for it in item_list if it["norm"].startswith(query_norm)]
-        contains = [
-            it for it in item_list if (query_norm in it["norm"]) and (it not in starts)
-        ]
-        filtered_items = starts + contains
+    if demo_mode:
+        DEMO_ITEM_NAME = "Mana Coagulada"  # pode trocar por outro nome exato do items.json
 
-        if not filtered_items:
-            st.warning("Nenhum item encontrado para esse termo de busca.")
+        demo_rows = [it for it in item_list if it["name"] == DEMO_ITEM_NAME]
+        if not demo_rows:
+            st.error(
+                f"Item de demo '{DEMO_ITEM_NAME}' não encontrado na base de itens. "
+                "Ajuste o nome em DEMO_ITEM_NAME no código."
+            )
             return
 
-        n = len(filtered_items)
+        item_selected = demo_rows[0]
 
-        if n == 1:
-            item_selected = filtered_items[0]
-            st.info(
-                f"Item selecionado automaticamente: "
-                f"**{item_selected['name']} ({item_selected['id']})**"
-            )
-        elif n <= 10:
-            st.warning("Foram encontrados vários itens, selecione o correto:")
+        st.info(
+            f"🔍 Você está visualizando o **modo demo** para o item "
+            f"**{item_selected['name']} ({item_selected['id']})**.\n\n"
+            "No modo demo, o registro de preços está desativado — "
+            "você pode apenas visualizar o histórico, gráficos e insights."
+        )
 
-            labels = [f"{it['name']} ({it['id']})" for it in filtered_items]
-            choice = st.radio(
-                "Itens encontrados:",
-                options=labels,
-                key="search_radio",
-            )
-            idx = labels.index(choice)
-            item_selected = filtered_items[idx]
+    # ======================================================
+    #  MODO NORMAL: busca + seleção
+    # ======================================================
+    if not demo_mode:
+        # ------------------------------------------------------
+        #  BUSCA: campo + botão "Buscar"
+        # ------------------------------------------------------
+        col_search, col_btn_search = st.columns([4, 1])
 
-        elif n <= 300:
-            st.warning(
-                f"Foram encontrados **{n} itens** para esse termo. "
-                f"Você pode refinar a busca (ex: `pocao branca`) "
-                f"ou escolher na lista abaixo."
+        with col_search:
+            query = st.text_input(
+                "🔎 Buscar item",
+                placeholder="Ex: edic, pocao, poçao, poção...",
+                key="search_item",
             )
 
-            labels = [f"{it['name']} ({it['id']})" for it in filtered_items]
-            label_to_item = {lbl: it for lbl, it in zip(labels, filtered_items)}
+        with col_btn_search:
+            st.markdown("<div style='height: 1.75rem'></div>", unsafe_allow_html=True)
+            st.button(
+                "Buscar",
+                key="btn_search_item",
+                use_container_width=True,
+                help="Clique aqui ou pressione Enter após digitar para buscar o item",
+            )
+
+        query_norm = normalize_text(query)
+        filtered_items = item_list
+
+        if query_norm:
+            # Primeiro quem COMEÇA com o termo
+            starts = [it for it in item_list if it["norm"].startswith(query_norm)]
+            # Depois quem CONTÉM o termo e não está em starts
+            contains = [
+                it
+                for it in item_list
+                if (query_norm in it["norm"]) and (it not in starts)
+            ]
+            filtered_items = starts + contains
+
+            if not filtered_items:
+                st.warning("Nenhum item encontrado para esse termo de busca.")
+                return
+
+            n = len(filtered_items)
+
+            if n == 1:
+                item_selected = filtered_items[0]
+                st.info(
+                    f"Item selecionado automaticamente: "
+                    f"**{item_selected['name']} ({item_selected['id']})**"
+                )
+
+            elif n <= 10:
+                st.warning("Foram encontrados vários itens, selecione o correto:")
+
+                labels = [f"{it['name']} ({it['id']})" for it in filtered_items]
+                choice = st.radio(
+                    "Itens encontrados:",
+                    options=labels,
+                    key="search_radio",
+                )
+                idx = labels.index(choice)
+                item_selected = filtered_items[idx]
+
+            elif n <= 300:
+                st.warning(
+                    f"Foram encontrados **{n} itens** para esse termo. "
+                    f"Você pode refinar a busca (ex: `pocao branca`) "
+                    f"ou escolher na lista abaixo."
+                )
+
+                labels = [f"{it['name']} ({it['id']})" for it in filtered_items]
+                label_to_item = {lbl: it for lbl, it in zip(labels, filtered_items)}
+
+                col_item, _, _, _ = st.columns([3, 2, 2, 1])
+                with col_item:
+                    choice = st.selectbox(
+                        "Itens encontrados:",
+                        options=labels,
+                        key="search_select_filtered",
+                        label_visibility="collapsed",
+                    )
+
+                item_selected = label_to_item[choice]
+
+            else:
+                st.warning(
+                    f"Foram encontrados **{n} itens**. "
+                    "Refine sua busca adicionando mais termos, "
+                    "por exemplo: `pocao branca pequena`."
+                )
+                return
+
+        else:
+            # Sem termo de busca → selectbox completo
+            filtered_items = item_list
+            if not filtered_items:
+                st.warning("Nenhum item encontrado. Verifique o arquivo items.json.")
+                return
+
+            selectbox_kwargs: dict = {}
+            default_item_id = None
+
+            if not df_prices_all.empty:
+                df_tmp = df_prices_all.copy()
+                df_tmp["date_parsed"] = pd.to_datetime(df_tmp["date"])
+                last_row = df_tmp.sort_values("date_parsed", ascending=False).iloc[0]
+                default_item_id = int(last_row["item_id"])
+
+            if default_item_id is not None:
+                for i, it in enumerate(filtered_items):
+                    if it["id"] == default_item_id:
+                        selectbox_kwargs["index"] = i
+                        break
 
             col_item, _, _, _ = st.columns([3, 2, 2, 1])
             with col_item:
-                choice = st.selectbox(
-                    "Itens encontrados:",
-                    options=labels,
-                    key="search_select_filtered",
+                item_selected = st.selectbox(
+                    "",
+                    options=filtered_items,
+                    format_func=lambda it: f"{it['name']} ({it['id']})",
+                    key="search_select",
                     label_visibility="collapsed",
+                    **selectbox_kwargs,
                 )
-
-            item_selected = label_to_item[choice]
-        else:
-            st.warning(
-                f"Foram encontrados **{n} itens**. "
-                "Refine sua busca adicionando mais termos, "
-                "por exemplo: `pocao branca pequena`."
-            )
-            return
-    else:
-        filtered_items = item_list
-        if not filtered_items:
-            st.warning("Nenhum item encontrado. Verifique o arquivo items.json.")
-            return
-
-        selectbox_kwargs: dict = {}
-        default_item_id = None
-        if not df_prices_all.empty:
-            df_tmp = df_prices_all.copy()
-            df_tmp["date_parsed"] = pd.to_datetime(df_tmp["date"])
-            last_row = df_tmp.sort_values("date_parsed", ascending=False).iloc[0]
-            default_item_id = int(last_row["item_id"])
-
-        if default_item_id is not None:
-            for i, it in enumerate(filtered_items):
-                if it["id"] == default_item_id:
-                    selectbox_kwargs["index"] = i
-                    break
-
-        col_item, _, _, _ = st.columns([3, 2, 2, 1])
-        with col_item:
-            item_selected = st.selectbox(
-                "",
-                options=filtered_items,
-                format_func=lambda it: f"{it['name']} ({it['id']})",
-                key="search_select",
-                label_visibility="collapsed",
-                **selectbox_kwargs,
-            )
 
     if item_selected is None:
         st.info("Escolha um item para começar.")
@@ -570,34 +614,43 @@ def render():
     # ---------------------------------------
     #  Formulário ÚNICO (keys novas)
     # ---------------------------------------
-    with st.form(key="price_form"):
-        form_col_date, form_col_price, form_col_btn = st.columns([2, 2, 1])
+    if demo_mode:
+        st.info(
+            "⚠️ Este é apenas um *preview* em **modo demo**. "
+            "O registro de preços está desativado aqui.\n\n"
+            "No ambiente real (sem `?demo=1` na URL) você poderá "
+            "registrar e atualizar os preços normalmente."
+        )
+        # Só pra manter variáveis definidas e evitar erros abaixo
+        sel_date = date.today()
+        price_str = ""
+        save_clicked = False
+    else:
+        with st.form(key="price_form"):
+            form_col_date, form_col_price, form_col_btn = st.columns([2, 2, 1])
 
-        with form_col_date:
-            sel_date = st.date_input(
-                "Data",
-                value=date.today(),
-                key="price_date",
-            )
+            with form_col_date:
+                sel_date = st.date_input(
+                    "Data",
+                    value=date.today(),
+                    key="price_date",
+                )
 
-        with form_col_price:
-            price_str = st.text_input(
-                "Preço (zeny)",
-                key="price_value",
-                placeholder="Ex: 650.000 ou 600000",
-            )
+            with form_col_price:
+                price_str = st.text_input(
+                    "Preço (zeny)",
+                    key="price_value",
+                    placeholder="Ex: 650.000 ou 600000",
+                )
 
-        with form_col_btn:
-            st.markdown("<div style='height: 1.8rem'></div>", unsafe_allow_html=True)
-            save_clicked = st.form_submit_button(
-                "Salvar",
-                use_container_width=True,
-                disabled=ss.get("is_saving", False),  # trava clique enquanto salva
-            )
-
+            with form_col_btn:
+                st.markdown("<div style='height: 1.8rem'></div>", unsafe_allow_html=True)
+                save_clicked = st.form_submit_button(
+                    "Salvar", use_container_width=True
+                )
 
     # Clique no salvar → decide entre INSERT ou fluxo de confirmação
-    if save_clicked and not ss.get("is_saving", False):
+    if not demo_mode and save_clicked and not ss.get("is_saving", False):
         ss["is_saving"] = True
         try:
             if not price_str.strip():
@@ -650,7 +703,6 @@ def render():
         finally:
             # se não deu rerun lá em cima, garante que desliga a flag
             ss["is_saving"] = False
-
 
     pending = ss.get("pending_update")
 
