@@ -20,13 +20,13 @@ from db.database import (
     get_pending_requests,
 )
 
-
 from services.market import compute_summary
 
 # ============================================
 #  Tema / layout base
 # ============================================
 apply_theme("Monitor de Mercado – Ragnarok LATAM", page_icon="📈")
+
 
 def is_admin() -> bool:
     """Retorna True se o e-mail logado estiver na lista de admins."""
@@ -49,7 +49,6 @@ def normalize_text(txt: str) -> str:
 # ============================================
 #  Cache de dados
 # ============================================
-
 @st.cache_data(ttl=30, show_spinner=False)
 def get_items_cached() -> pd.DataFrame:
     return get_items_df()
@@ -73,10 +72,10 @@ def get_global_summary_cached() -> pd.DataFrame:
     df_summary_input = df_prices_all.rename(columns={"item_name": "item"})
     return compute_summary(df_summary_input)
 
+
 # ============================================
 #  Helpers
 # ============================================
-
 def fmt_zeny(v: float | int | None) -> str:
     if v is None or pd.isna(v):
         return "-"
@@ -96,7 +95,7 @@ def style_market_table(df: pd.DataFrame):
     Aplica cores em:
     - Coluna de variação percentual (nome pode ser 'Variação % vs média 5'
       ou 'Var % vs 5d', dependendo da tabela)
-    - Status ('Vender' em vermelho)
+    - Status ('Vender' em vermelho, 'Comprar' em verde)
     """
 
     def color_var(val):
@@ -136,11 +135,11 @@ def style_market_table(df: pd.DataFrame):
 
     return styler
 
+
 # ============================================
 #  Página principal
 # ============================================
 def render():
-    
     if not st.session_state.get("auth_ok", False):
         st.warning("Você não está autenticado. Faça login para continuar.")
         st.stop()
@@ -148,6 +147,64 @@ def render():
     st.title("📈 Monitor de Mercado – Ragnarok LATAM")
 
     ss = st.session_state
+
+    if "is_saving" not in ss:
+        ss["is_saving"] = False
+
+    # Overlay global enquanto está salvando
+    if ss.get("is_saving", False):
+        st.markdown(
+            """
+            <style>
+            .loading-overlay {
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100vw;
+                height: 100vh;
+                background: rgba(0, 0, 0, 0.65);
+                z-index: 9999;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .loading-overlay-content {
+                background: rgba(15,23,42,0.95);
+                padding: 1.5rem 2rem;
+                border-radius: 0.75rem;
+                border: 1px solid rgba(59,130,246,0.7);
+                font-size: 0.95rem;
+            }
+            </style>
+            <div class="loading-overlay">
+              <div class="loading-overlay-content">
+                ⏳ Processando sua ação...<br/>
+                <small>Por favor, aguarde alguns segundos.</small>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+
+    # ------------------------------
+    #  Estado global simples
+    # ------------------------------
+    if "price_value" not in ss:
+        ss["price_value"] = ""
+    if "last_item_id" not in ss:
+        ss["last_item_id"] = None
+    if "clear_price" not in ss:
+        ss["clear_price"] = False
+    if "flash_message" not in ss:
+        ss["flash_message"] = ""
+    if "flash_type" not in ss:
+        ss["flash_type"] = "success"
+    if "pending_update" not in ss:
+        ss["pending_update"] = None
+    if "price_action" not in ss:
+        ss["price_action"] = None  # "confirm_update" | "cancel_update" | None
 
     # ---------------------------------------
     # Barra superior: usuário logado + sininho (se admin)
@@ -195,7 +252,6 @@ def render():
                 help_txt = "Nenhuma solicitação pendente"
                 disabled = True
 
-            # 👇 sem callback; navegação feita no if
             notif_clicked = st.button(
                 label,
                 key="btn_admin_requests",
@@ -208,24 +264,6 @@ def render():
         else:
             st.empty()
 
-        # ------------------------------
-    #  Estado global simples
-    # ------------------------------
-    if "price_input" not in ss:
-        ss["price_input"] = ""
-    if "last_item_id" not in ss:
-        ss["last_item_id"] = None
-    if "clear_price" not in ss:
-        ss["clear_price"] = False
-    if "flash_message" not in ss:
-        ss["flash_message"] = ""
-    if "flash_type" not in ss:
-        ss["flash_type"] = "success"
-    if "pending_update" not in ss:
-        ss["pending_update"] = None
-    if "price_action" not in ss:
-        ss["price_action"] = None  # "confirm_update" | "cancel_update" | None
-
     # ------------------------------
     #  Carrega itens e preços (COM CACHE)
     # ------------------------------
@@ -236,43 +274,117 @@ def render():
 
     df_prices_all = get_all_prices_cached()
 
-    # Monta lista de itens já normalizada para busca sem acento
+    # ------------------------------------------------------
+    #  Agrupa itens com o MESMO name em um item "canônico"
+    #  (ex.: duas "Caixa de Veneno Mortal (30)" -> 1 linha só)
+    # ------------------------------------------------------
+    items_df_sorted = items_df.sort_values("id")
+    items_canonical = (
+        items_df_sorted.groupby("name", as_index=False).first()[["id", "name"]]
+    )
+
     item_list: list[dict] = []
-    for row in items_df.to_dict(orient="records"):
+    for row in items_canonical.to_dict(orient="records"):
         name = row["name"]
         item_list.append(
             {
-                "id": int(row["id"]),
+                "id": int(row["id"]),  # id CANÔNICO
                 "name": name,
                 "norm": normalize_text(name),
             }
         )
 
-    # Campo de busca (sem acento / case-insensitive)
-    query = st.text_input(
-        "🔎 Buscar item",
-        placeholder="Ex: edic, pocao, acao...",
-    )
-    query_norm = normalize_text(query) if query else ""
+    # ------------------------------------------------------
+    #  BUSCA: campo + botão "Buscar"
+    # ------------------------------------------------------
+    col_search, col_btn_search = st.columns([4, 1])
 
-    # Aplica filtro sobre o nome normalizado
+    with col_search:
+        query = st.text_input(
+            "🔎 Buscar item",
+            placeholder="Ex: edic, pocao, poçao, poção...",
+            key="search_item",
+        )
+
+    with col_btn_search:
+        st.markdown("<div style='height: 1.75rem'></div>", unsafe_allow_html=True)
+        st.button(
+            "Buscar",
+            key="btn_search_item",
+            use_container_width=True,
+            help="Clique aqui ou pressione Enter após digitar para buscar o item",
+        )
+
+    query_norm = normalize_text(query)
+
+    filtered_items = item_list
+    item_selected = None
+
     if query_norm:
-        filtered_items = [it for it in item_list if query_norm in it["norm"]]
+        starts = [it for it in item_list if it["norm"].startswith(query_norm)]
+        contains = [
+            it for it in item_list if (query_norm in it["norm"]) and (it not in starts)
+        ]
+        filtered_items = starts + contains
+
+        if not filtered_items:
+            st.warning("Nenhum item encontrado para esse termo de busca.")
+            return
+
+        n = len(filtered_items)
+
+        if n == 1:
+            item_selected = filtered_items[0]
+            st.info(
+                f"Item selecionado automaticamente: "
+                f"**{item_selected['name']} ({item_selected['id']})**"
+            )
+        elif n <= 10:
+            st.warning("Foram encontrados vários itens, selecione o correto:")
+
+            labels = [f"{it['name']} ({it['id']})" for it in filtered_items]
+            choice = st.radio(
+                "Itens encontrados:",
+                options=labels,
+                key="search_radio",
+            )
+            idx = labels.index(choice)
+            item_selected = filtered_items[idx]
+
+        elif n <= 300:
+            st.warning(
+                f"Foram encontrados **{n} itens** para esse termo. "
+                f"Você pode refinar a busca (ex: `pocao branca`) "
+                f"ou escolher na lista abaixo."
+            )
+
+            labels = [f"{it['name']} ({it['id']})" for it in filtered_items]
+            label_to_item = {lbl: it for lbl, it in zip(labels, filtered_items)}
+
+            col_item, _, _, _ = st.columns([3, 2, 2, 1])
+            with col_item:
+                choice = st.selectbox(
+                    "Itens encontrados:",
+                    options=labels,
+                    key="search_select_filtered",
+                    label_visibility="collapsed",
+                )
+
+            item_selected = label_to_item[choice]
+        else:
+            st.warning(
+                f"Foram encontrados **{n} itens**. "
+                "Refine sua busca adicionando mais termos, "
+                "por exemplo: `pocao branca pequena`."
+            )
+            return
     else:
         filtered_items = item_list
+        if not filtered_items:
+            st.warning("Nenhum item encontrado. Verifique o arquivo items.json.")
+            return
 
-    if not filtered_items:
-        st.warning("Nenhum item encontrado para esse termo de busca.")
-        return
-
-    # Define item padrão
-    selectbox_kwargs: dict = {}
-
-    if query_norm:
-        # Quando o usuário está filtrando, sempre começa no primeiro resultado
-        selectbox_kwargs["index"] = 0
-    else:
-        # Sem filtro: usa o último item que teve preço registrado
+        selectbox_kwargs: dict = {}
         default_item_id = None
         if not df_prices_all.empty:
             df_tmp = df_prices_all.copy()
@@ -286,12 +398,24 @@ def render():
                     selectbox_kwargs["index"] = i
                     break
 
+        col_item, _, _, _ = st.columns([3, 2, 2, 1])
+        with col_item:
+            item_selected = st.selectbox(
+                "",
+                options=filtered_items,
+                format_func=lambda it: f"{it['name']} ({it['id']})",
+                key="search_select",
+                label_visibility="collapsed",
+                **selectbox_kwargs,
+            )
 
-    # ------------------------------
-    #  Processa ações pendentes (confirmar/cancelar update)
-    #  -> isso roda ANTES de desenhar os botões, então não tem duplicação
-    # ------------------------------
-    
+    if item_selected is None:
+        st.info("Escolha um item para começar.")
+        return
+
+    item_id = item_selected["id"]
+    item_name = item_selected["name"]
+
     # ======================================================
     #  Ação pós-clique (confirmar / cancelar atualização)
     # ======================================================
@@ -300,22 +424,16 @@ def render():
     if action == "confirm_update":
         pending = ss.get("pending_update")
         if pending is not None:
-            admin_flag = is_admin()  # usa a função que olha secrets
-            user_id = (
-                ss.get("user_email")   # se tiver email, usa
-                or ss.get("username")  # senão usa o username
-                or "desconhecido"
-            )
+            admin_flag = is_admin()
+            user_id = ss.get("user_email") or ss.get("username") or "desconhecido"
 
             if admin_flag:
-                # 👑 ADMIN: atualiza direto
                 update_price(
                     pending["item_id"],
                     pending["date_str"],
                     pending["new_price"],
                 )
 
-                # Log técnico de alteração (tabela macro)
                 try:
                     log_price_change(
                         item_id=pending["item_id"],
@@ -328,7 +446,6 @@ def render():
                 except Exception as e:
                     print(f"[WARN] Falha ao logar alteração de preço: {e}")
 
-                # 🔒 Log de auditoria fina (price_audit_log)
                 try:
                     log_price_action(
                         item_id=pending["item_id"],
@@ -343,8 +460,6 @@ def render():
                 except Exception as e:
                     print(f"[WARN] Falha ao logar ação de update em price_audit_log: {e}")
 
-
-                # limpa caches relacionados
                 get_all_prices_cached.clear()
                 get_global_summary_cached.clear()
                 get_price_history_cached.clear()
@@ -355,9 +470,7 @@ def render():
                 ss["pending_update"] = None
                 ss["price_action"] = None
                 st.rerun()
-
             else:
-                # 🙋 Usuário normal: cria SOLICITAÇÃO para admin
                 try:
                     print("\n===== DEBUG: Enviando solicitação =====")
                     print(f"item_id: {pending['item_id']}")
@@ -367,14 +480,13 @@ def render():
                     print(f"user: {user_id}")
                     print("========================================\n")
 
-                    # chamada POSICIONAL, sem keywords
                     req_id = create_price_change_request(
-                        pending["item_id"],          # item_id
-                        pending["date_str"],         # date_str
-                        pending["existing_price"],   # old_price_zeny
-                        pending["new_price"],        # new_price_zeny
-                        user_id,                     # requested_by
-                        None,                        # reason
+                        pending["item_id"],
+                        pending["date_str"],
+                        pending["existing_price"],
+                        pending["new_price"],
+                        user_id,
+                        None,
                     )
 
                     print(f"===== DEBUG: Solicitação criada com id={req_id} =====")
@@ -383,7 +495,6 @@ def render():
                         "Solicitação de alteração enviada para os administradores."
                     )
                     ss["flash_type"] = "info"
-
                 except Exception as e:
                     print("\n===== DEBUG ERROR =====")
                     print("Erro no envio da solicitação:")
@@ -402,7 +513,6 @@ def render():
                 st.rerun()
 
     elif action == "cancel_update":
-        # CANCELAR: só limpa o estado e mostra mensagem
         ss["pending_update"] = None
         ss["flash_message"] = (
             "Atualização cancelada. Nenhuma alteração foi feita."
@@ -412,8 +522,6 @@ def render():
         st.rerun()
 
     st.markdown("---")
-
-
 
     # ------------------------------
     #  Card de registro diário
@@ -433,32 +541,13 @@ def render():
         unsafe_allow_html=True,
     )
 
-    # Linha 1 – seleção do item (fora do form)
-    col_item, _, _, _ = st.columns([3, 2, 2, 1])
-
-    with col_item:
-        item_selected = st.selectbox(
-        "Item",
-        options=filtered_items,
-        format_func=lambda it: f"{it['name']} ({it['id']})",
-        **selectbox_kwargs,
-    )
-
-
-    if item_selected is None:
-        st.info("Escolha um item para começar.")
-        return
-
-    item_id = item_selected["id"]
-    item_name = item_selected["name"]
-
     # Limpa input se precisou ou mudou de item
     if ss["clear_price"]:
-        ss["price_input"] = ""
+        ss["price_value"] = ""
         ss["clear_price"] = False
 
     if item_id != ss["last_item_id"]:
-        ss["price_input"] = ""
+        ss["price_value"] = ""
         ss["last_item_id"] = item_id
 
     # Flash message (sucesso / info após insert/update/cancel)
@@ -478,81 +567,90 @@ def render():
         ss["flash_message"] = ""
         ss["flash_type"] = "success"
 
-    # Linha 2 – formulário (Enter dispara o submit)
-    with st.form(key=f"form_registro_preco_{item_id}"):
+    # ---------------------------------------
+    #  Formulário ÚNICO (keys novas)
+    # ---------------------------------------
+    with st.form(key="price_form"):
         form_col_date, form_col_price, form_col_btn = st.columns([2, 2, 1])
 
         with form_col_date:
             sel_date = st.date_input(
                 "Data",
                 value=date.today(),
-                key=f"date_input_{item_id}",
+                key="price_date",
             )
 
         with form_col_price:
             price_str = st.text_input(
                 "Preço (zeny)",
-                key="price_input",
+                key="price_value",
                 placeholder="Ex: 650.000 ou 600000",
             )
 
         with form_col_btn:
-            st.write("")
-            save_clicked = st.form_submit_button("Salvar", use_container_width=True)
+            st.markdown("<div style='height: 1.8rem'></div>", unsafe_allow_html=True)
+            save_clicked = st.form_submit_button(
+                "Salvar",
+                use_container_width=True,
+                disabled=ss.get("is_saving", False),  # trava clique enquanto salva
+            )
+
 
     # Clique no salvar → decide entre INSERT ou fluxo de confirmação
-    if save_clicked:
-        if not price_str.strip():
-            st.warning("Informe um preço.")
-        else:
-            normalized = price_str.replace(".", "").replace(",", "")
-            try:
-                price_val = int(normalized)
+    if save_clicked and not ss.get("is_saving", False):
+        ss["is_saving"] = True
+        try:
+            if not price_str.strip():
+                st.warning("Informe um preço.")
+            else:
+                normalized = price_str.replace(".", "").replace(",", "")
+                try:
+                    price_val = int(normalized)
 
-                if price_val <= 0:
-                    st.warning("Informe um preço maior que zero.")
-                    return
+                    if price_val <= 0:
+                        st.warning("Informe um preço maior que zero.")
+                        return
 
-                # Bloqueia data futura antes de consultar o banco
-                if sel_date > date.today():
-                    st.warning("Não é permitido registrar preço em data futura.")
-                    return
+                    if sel_date > date.today():
+                        st.warning("Não é permitido registrar preço em data futura.")
+                        return
 
-                date_str = sel_date.isoformat()
-                existing_price = get_existing_price(item_id, date_str)
+                    date_str = sel_date.isoformat()
+                    existing_price = get_existing_price(item_id, date_str)
 
-                if existing_price is None:
-                    # Não existe registro → insere direto
-                    insert_price(item_id, date_str, price_val)
+                    if existing_price is None:
+                        insert_price(item_id, date_str, price_val)
 
-                    get_all_prices_cached.clear()
-                    get_global_summary_cached.clear()
-                    get_price_history_cached.clear()
+                        get_all_prices_cached.clear()
+                        get_global_summary_cached.clear()
+                        get_price_history_cached.clear()
 
-                    ss["clear_price"] = True
-                    ss["flash_message"] = "Preço salvo com sucesso!"
-                    ss["flash_type"] = "success"
-                    ss["pending_update"] = None
-                    st.rerun()
-
-                else:
-                    # Já existe → abre fluxo de atualização
-                    ss["pending_update"] = {
-                        "item_id": item_id,
-                        "item_name": item_name,
-                        "date_str": date_str,
-                        "existing_price": existing_price,
-                        "new_price": price_val,
-                    }
+                        ss["clear_price"] = True
+                        ss["flash_message"] = "Preço salvo com sucesso!"
+                        ss["flash_type"] = "success"
+                        ss["pending_update"] = None
+                        ss["is_saving"] = False
+                        st.rerun()
+                    else:
+                        ss["pending_update"] = {
+                            "item_id": item_id,
+                            "item_name": item_name,
+                            "date_str": date_str,
+                            "existing_price": existing_price,
+                            "new_price": price_val,
+                        }
+                        st.warning(
+                            "Já existe um preço cadastrado para este item nesta data. "
+                            "Confira abaixo antes de confirmar a atualização."
+                        )
+                except ValueError:
                     st.warning(
-                        "Já existe um preço cadastrado para este item nesta data. "
-                        "Confira abaixo antes de confirmar a atualização."
+                        "Preço inválido. Use apenas números (ex: 650000, 650.000 ou 650,000)."
                     )
+        finally:
+            # se não deu rerun lá em cima, garante que desliga a flag
+            ss["is_saving"] = False
 
-            except ValueError:
-                st.warning(
-                    "Preço inválido. Use apenas números (ex: 650000, 650.000 ou 650,000)."
-                )
 
     pending = ss.get("pending_update")
 
@@ -566,7 +664,6 @@ def render():
         col_confirm, col_cancel = st.columns([1, 1])
 
         if is_admin():
-            # 👑 Admin confirma e aplica direto
             col_confirm.button(
                 "✅ Atualizar preço do dia",
                 key="btn_confirm_update",
@@ -574,7 +671,6 @@ def render():
                 on_click=lambda: ss.update(price_action="confirm_update"),
             )
         else:
-            # 🙋 Usuário normal: envia solicitação para admin
             col_confirm.button(
                 "♻️ Enviar solicitação para admin",
                 key="btn_request_change",
@@ -582,7 +678,6 @@ def render():
                 on_click=lambda: ss.update(price_action="confirm_update"),
             )
 
-        # Todos podem cancelar
         col_cancel.button(
             "❌ Cancelar atualização",
             key="btn_cancel_update",
@@ -590,10 +685,7 @@ def render():
             on_click=lambda: ss.update(price_action="cancel_update"),
         )
 
-
-
     st.markdown("---")
-
 
     # ======================================================
     #  KPIs do item selecionado
