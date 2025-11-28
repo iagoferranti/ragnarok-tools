@@ -340,9 +340,9 @@ def render():
 
         st.markdown("### 📦 Itens com histórico")
 
-        # combobox centralizado e mais compacto
-        col_left, col_center, col_right = st.columns([1, 3, 1])
-        with col_center:
+        # Combobox alinhado à esquerda (em 50% da largura)
+        col_left, col_mid = st.columns([3, 7])
+        with col_left:
             item_selected = st.selectbox(
                 "",
                 options=historical_items,
