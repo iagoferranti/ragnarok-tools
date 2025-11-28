@@ -312,40 +312,44 @@ def render():
         )
 
     # ======================================================
-    #  Seleção de item
-    #   - DEMO: só itens que já têm histórico (sem busca)
-    #   - NORMAL: busca + seleção
+    #  MODO DEMO: item com histórico, sem busca / cadastro
     # ======================================================
     item_selected = None
 
     if demo_mode:
-        # Pega só itens que já têm histórico na tabela de preços
+        # pega todos os preços cadastrados (já carregados acima)
         if df_prices_all.empty:
-            st.info(
-                "Ainda não há histórico de preços cadastrado para exibir no modo demo."
+            st.warning("Ainda não há histórico de preços para mostrar no modo demo.")
+            return
+
+
+        # ids de itens que já têm histórico
+        ids_with_history = sorted(df_prices_all["item_id"].unique())
+
+        # mapeia para a lista de itens já montada (item_list)
+        id_to_item = {it["id"]: it for it in item_list}
+        historical_items = [
+            id_to_item[i] for i in ids_with_history if i in id_to_item
+        ]
+
+        if not historical_items:
+            st.warning(
+                "Nenhum dos itens com preço no histórico foi encontrado na base de itens."
             )
             return
 
-        ids_with_hist = sorted(df_prices_all["item_id"].dropna().unique().tolist())
-        demo_items = [it for it in item_list if it["id"] in ids_with_hist]
+        st.markdown("### 📦 Itens com histórico")
 
-        if not demo_items:
-            st.info(
-                "Ainda não há itens com histórico suficiente para o modo demo."
+        # combobox centralizado e mais compacto
+        col_left, col_center, col_right = st.columns([1, 3, 1])
+        with col_center:
+            item_selected = st.selectbox(
+                "",
+                options=historical_items,
+                format_func=lambda it: f"{it['name']} ({it['id']})",
+                key="demo_select_item",
+                label_visibility="collapsed",
             )
-            return
-
-        st.info(
-            "🔍 **Modo demo**: selecione abaixo um item que já possui histórico "
-            "para visualizar gráficos e insights."
-        )
-
-        item_selected = st.selectbox(
-            "Itens com histórico",
-            options=demo_items,
-            format_func=lambda it: f"{it['name']} ({it['id']})",
-            key="demo_select_item",
-        )
 
     else:
         # ------------------------------
