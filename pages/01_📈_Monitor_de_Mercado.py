@@ -141,13 +141,22 @@ def style_market_table(df: pd.DataFrame):
 # ============================================
 def render():
     # --- Modo demo via query string (?demo=1) ---
+    ss = st.session_state
+
+    # --- Modo demo: lê querystring UMA vez e nunca derruba se já estiver True ---
+    prev_demo = bool(ss.get("demo_mode", False))
+
     raw_demo = st.query_params.get("demo", None)
     if isinstance(raw_demo, list):
         raw_demo = raw_demo[0]
-    demo_mode = (raw_demo == "1")
 
-    ss = st.session_state
-    ss["demo_mode"] = demo_mode  # sempre atualiza
+    if raw_demo == "1":
+        demo_mode = True
+    else:
+        # se já estava em demo na sessão, mantém
+        demo_mode = prev_demo
+
+    ss["demo_mode"] = demo_mode  # sempre persiste
 
     # Se NÃO for demo, exige autenticação normal
     if not demo_mode and not ss.get("auth_ok", False):
