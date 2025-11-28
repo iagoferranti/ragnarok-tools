@@ -9,42 +9,35 @@ def render():
 
     ss = st.session_state
 
-    # ------------------------------------------------------------
-    # 1) DETECTA MODO DEMO (?demo=1) E PULA LOGIN
-    # ------------------------------------------------------------
-    # --- Modo demo via query string (?demo=1) ---
+    # ======================================================
+    #   1) DETECTA MODO DEMO
+    # ======================================================
     raw_demo = st.query_params.get("demo", None)
 
-    # st.query_params pode retornar "1" ou ["1"]
+    # st.query_params pode retornar ["1"] ou "1"
     if isinstance(raw_demo, list):
         raw_demo = raw_demo[0]
 
     demo_mode = (raw_demo == "1")
 
-    ss["demo_mode"] = demo_mode  # deixa disponível para o Monitor
-
+    # 🚨 Se for DEMO → pula tudo e vai direto para o Monitor
     if demo_mode:
-        st.info(
-            "🧪 Você está acessando o **Modo Demo**.\n\n"
-            "Não é necessário informar e-mail. "
-            "Redirecionando automaticamente para o painel..."
-        )
+        ss["auth_ok"] = True
+        ss["user_email"] = "demo@preview"
+        ss["username"] = "demo_preview"
+
+        st.info("🔍 Entrando em **Modo Demo** (login desativado)...")
+
         st.switch_page("pages/01_📈_Monitor_de_Mercado.py")
-        st.stop()
+        return
 
-    # ------------------------------------------------------------
-    # 2) LISTAS DE AUTORIZAÇÃO (modo normal)
-    # ------------------------------------------------------------
-    allowed_emails = [
-        e.lower() for e in st.secrets["auth"].get("allowed_emails", [])
-    ]
-    admin_emails = [
-        e.lower() for e in st.secrets["roles"].get("admins", [])
-    ]
+    # ======================================================
+    #   2) LOGIN NORMAL
+    # ======================================================
+    allowed_emails = [e.lower() for e in st.secrets["auth"].get("allowed_emails", [])]
+    admin_emails = [e.lower() for e in st.secrets["roles"].get("admins", [])]
 
-    # ------------------------------------------------------------
-    # 3) Se já estiver logado → mostra info e botão de logout
-    # ------------------------------------------------------------
+    # Já logado
     if ss.get("auth_ok", False):
         current_email = ss.get("user_email") or ss.get("username") or "desconhecido"
         st.success(f"Você já está logado como **{current_email}**.")
@@ -55,9 +48,6 @@ def render():
             st.rerun()
         return
 
-    # ------------------------------------------------------------
-    # 4) Formulário de login (modo normal)
-    # ------------------------------------------------------------
     st.markdown(
         """
         Informe seu **e-mail cadastrado** para acessar o painel.  
@@ -65,16 +55,15 @@ def render():
         """
     )
 
+    # FORM DE LOGIN
     with st.form("login_form"):
         email_input = st.text_input(
             "E-mail",
             placeholder="voce@exemplo.com",
+            key="login_email_input",
         )
         submit = st.form_submit_button("Entrar")
 
-    # ------------------------------------------------------------
-    # 5) Validação do login
-    # ------------------------------------------------------------
     if submit:
         email_norm = (email_input or "").strip().lower()
 
@@ -95,7 +84,6 @@ def render():
         else:
             st.success("Login realizado com sucesso.")
 
-        # Redireciona para o Monitor
         st.switch_page("pages/01_📈_Monitor_de_Mercado.py")
 
 
