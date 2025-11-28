@@ -9,7 +9,25 @@ def render():
 
     ss = st.session_state
 
-    # Lê listas do secrets
+    # ------------------------------------------------------------
+    # 1) DETECTA MODO DEMO (?demo=1) E PULA LOGIN
+    # ------------------------------------------------------------
+    demo_param = st.query_params.get("demo")
+    demo_mode = (demo_param == "1")
+    ss["demo_mode"] = demo_mode  # deixa disponível para o Monitor
+
+    if demo_mode:
+        st.info(
+            "🧪 Você está acessando o **Modo Demo**.\n\n"
+            "Não é necessário informar e-mail. "
+            "Redirecionando automaticamente para o painel..."
+        )
+        st.switch_page("pages/01_📈_Monitor_de_Mercado.py")
+        st.stop()
+
+    # ------------------------------------------------------------
+    # 2) LISTAS DE AUTORIZAÇÃO (modo normal)
+    # ------------------------------------------------------------
     allowed_emails = [
         e.lower() for e in st.secrets["auth"].get("allowed_emails", [])
     ]
@@ -17,7 +35,9 @@ def render():
         e.lower() for e in st.secrets["roles"].get("admins", [])
     ]
 
-    # Se já estiver logado, mostra info e opção de logout
+    # ------------------------------------------------------------
+    # 3) Se já estiver logado → mostra info e botão de logout
+    # ------------------------------------------------------------
     if ss.get("auth_ok", False):
         current_email = ss.get("user_email") or ss.get("username") or "desconhecido"
         st.success(f"Você já está logado como **{current_email}**.")
@@ -28,6 +48,9 @@ def render():
             st.rerun()
         return
 
+    # ------------------------------------------------------------
+    # 4) Formulário de login (modo normal)
+    # ------------------------------------------------------------
     st.markdown(
         """
         Informe seu **e-mail cadastrado** para acessar o painel.  
@@ -35,16 +58,16 @@ def render():
         """
     )
 
-    # 👇 Formulário: Enter dentro do input dispara o submit
     with st.form("login_form"):
         email_input = st.text_input(
             "E-mail",
             placeholder="voce@exemplo.com",
         )
-
-        # Botão padrão (sem use_container_width) = mais minimalista
         submit = st.form_submit_button("Entrar")
 
+    # ------------------------------------------------------------
+    # 5) Validação do login
+    # ------------------------------------------------------------
     if submit:
         email_norm = (email_input or "").strip().lower()
 
@@ -56,12 +79,10 @@ def render():
             st.error("Este e-mail não está autorizado. Fale com o administrador.")
             return
 
-        # Marca sessão como autenticada
         ss["auth_ok"] = True
         ss["user_email"] = email_norm
-        ss["username"] = email_norm  # se quiser usar como chave única
+        ss["username"] = email_norm
 
-        # Feedback rápido
         if email_norm in admin_emails:
             st.success("Login realizado com sucesso. (Perfil: admin)")
         else:
