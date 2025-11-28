@@ -140,14 +140,14 @@ def style_market_table(df: pd.DataFrame):
 #  Página principal
 # ============================================
 def render():
-    ss = st.session_state
-
-    # --- Detecta modo demo via query string (?demo=1) ---
+    # --- Modo demo via query string (?demo=1) ---
     raw_demo = st.query_params.get("demo", None)
     if isinstance(raw_demo, list):
         raw_demo = raw_demo[0]
     demo_mode = (raw_demo == "1")
-    ss["demo_mode"] = demo_mode
+
+    ss = st.session_state
+    ss["demo_mode"] = demo_mode  # sempre atualiza
 
     # Se NÃO for demo, exige autenticação normal
     if not demo_mode and not ss.get("auth_ok", False):
@@ -156,12 +156,11 @@ def render():
 
     st.title("📈 Monitor de Mercado – Ragnarok LATAM")
 
-    # Flag de salvamento (apenas modo normal)
     if "is_saving" not in ss:
         ss["is_saving"] = False
 
-    if ss.get("is_saving", False) and not demo_mode:
-        # Overlay global enquanto está salvando
+    # Overlay global enquanto está salvando
+    if ss.get("is_saving", False):
         st.markdown(
             """
             <style>
@@ -217,7 +216,7 @@ def render():
     # Barra superior: usuário logado + sininho (se admin)
     # ---------------------------------------
     if demo_mode:
-        user_display = "Modo Demo (somente leitura)"
+        user_display = "demo@preview"
     else:
         user_display = ss.get("user_email") or ss.get("username") or "desconhecido"
 
@@ -304,45 +303,45 @@ def render():
         )
 
     # ======================================================
-    #  SELEÇÃO DE ITEM
-    #   - Demo: apenas itens que já têm histórico (selectbox simples)
-    #   - Normal: busca + seleção
+    #  Seleção de item
+    #   - DEMO: só itens que já têm histórico (sem busca)
+    #   - NORMAL: busca + seleção
     # ======================================================
     item_selected = None
 
     if demo_mode:
-        # Itens que já têm histórico de preço
+        # Pega só itens que já têm histórico na tabela de preços
         if df_prices_all.empty:
-            st.warning(
-                "Modo demo indisponível no momento: ainda não há nenhum preço cadastrado."
+            st.info(
+                "Ainda não há histórico de preços cadastrado para exibir no modo demo."
             )
             return
 
-        valid_ids = sorted(df_prices_all["item_id"].unique().tolist())
-        demo_items = [it for it in item_list if it["id"] in valid_ids]
+        ids_with_hist = sorted(df_prices_all["item_id"].dropna().unique().tolist())
+        demo_items = [it for it in item_list if it["id"] in ids_with_hist]
 
         if not demo_items:
-            st.warning(
-                "Modo demo indisponível: não foi possível encontrar itens com histórico."
+            st.info(
+                "Ainda não há itens com histórico suficiente para o modo demo."
             )
             return
 
         st.info(
-            "🔍 Este é um *preview* somente leitura. "
-            "Escolha abaixo um item que já possui histórico de preços."
+            "🔍 **Modo demo**: selecione abaixo um item que já possui histórico "
+            "para visualizar gráficos e insights."
         )
 
         item_selected = st.selectbox(
-            "Item para visualizar",
+            "Itens com histórico",
             options=demo_items,
             format_func=lambda it: f"{it['name']} ({it['id']})",
-            key="demo_item_select",
+            key="demo_select_item",
         )
 
     else:
-        # -------------------------
-        #  BUSCA + seleção (normal)
-        # -------------------------
+        # ------------------------------
+        #  BUSCA: campo + botão "Buscar"
+        # ------------------------------
         col_search, col_btn_search = st.columns([4, 1])
 
         with col_search:
@@ -361,8 +360,7 @@ def render():
                 help="Clique aqui ou pressione Enter após digitar para buscar o item",
             )
 
-        query_norm = normalize_text(query or "")
-
+        query_norm = normalize_text(query)
         filtered_items = item_list
 
         if query_norm:
@@ -456,6 +454,9 @@ def render():
                     **selectbox_kwargs,
                 )
 
+    # ------------------------------------------------------
+    # Se ainda não tem item, encerra
+    # ------------------------------------------------------
     if item_selected is None:
         st.info("Escolha um item para começar.")
         return
@@ -464,10 +465,11 @@ def render():
     item_name = item_selected["name"]
 
     # ======================================================
-    #  Ação pós-clique (confirmar / cancelar atualização)
-    #  (somente modo normal)
+    #  BLOCO DE EDIÇÃO / REGISTRO DE PREÇO
+    #  (APENAS MODO NORMAL, NUNCA NO DEMO)
     # ======================================================
     if not demo_mode:
+        #  Ação pós-clique (confirmar / cancelar atualização)
         action = ss.get("price_action")
 
         if action == "confirm_update":
@@ -523,14 +525,6 @@ def render():
                     st.rerun()
                 else:
                     try:
-                        print("\n===== DEBUG: Enviando solicitação =====")
-                        print(f"item_id: {pending['item_id']}")
-                        print(f"date: {pending['date_str']}")
-                        print(f"old_price: {pending['existing_price']}")
-                        print(f"new_price: {pending['new_price']}")
-                        print(f"user: {user_id}")
-                        print("========================================\n")
-
                         req_id = create_price_change_request(
                             pending["item_id"],
                             pending["date_str"],
@@ -540,7 +534,9 @@ def render():
                             None,
                         )
 
-                        print(f"===== DEBUG: Solicitação criada com id={req_id} =====")
+                        print(
+                            f"===== DEBUG: Solicitação criada com id={req_id} ====="
+                        )
 
                         ss["flash_message"] = (
                             "Solicitação de alteração enviada para os administradores."
@@ -572,30 +568,11 @@ def render():
             ss["price_action"] = None
             st.rerun()
 
-    st.markdown("---")
+        st.markdown("---")
 
-    # ------------------------------
-    #  Card de registro diário
-    #   - Normal: formulário completo
-    #   - Demo: somente aviso de leitura
-    # ------------------------------
-    if demo_mode:
-        st.markdown(
-            """
-            <div class="card">
-              <div class="section-title">
-                <span class="icon">📝</span>
-                <span>Registrar preço diário (desativado no modo demo)</span>
-              </div>
-              <div class="section-subtitle">
-                No modo demo você pode apenas visualizar histórico, gráficos e insights.
-                Para registrar preços, acesse o painel real com seu e-mail cadastrado.
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
+        # ------------------------------
+        #  Card de registro diário
+        # ------------------------------
         st.markdown(
             """
             <div class="card">
@@ -637,7 +614,7 @@ def render():
             ss["flash_message"] = ""
             ss["flash_type"] = "success"
 
-        # Formulário único
+        # Formulário de registro
         with st.form(key="price_form"):
             form_col_date, form_col_price, form_col_btn = st.columns([2, 2, 1])
 
@@ -657,7 +634,9 @@ def render():
 
             with form_col_btn:
                 st.markdown("<div style='height: 1.8rem'></div>", unsafe_allow_html=True)
-                save_clicked = st.form_submit_button("Salvar", use_container_width=True)
+                save_clicked = st.form_submit_button(
+                    "Salvar", use_container_width=True
+                )
 
         # Clique no salvar → decide entre INSERT ou fluxo de confirmação
         if save_clicked and not ss.get("is_saving", False):
@@ -675,7 +654,9 @@ def render():
                             return
 
                         if sel_date > date.today():
-                            st.warning("Não é permitido registrar preço em data futura.")
+                            st.warning(
+                                "Não é permitido registrar preço em data futura."
+                            )
                             return
 
                         date_str = sel_date.isoformat()
@@ -708,9 +689,11 @@ def render():
                             )
                     except ValueError:
                         st.warning(
-                            "Preço inválido. Use apenas números (ex: 650000, 650.000 ou 650,000)."
+                            "Preço inválido. Use apenas números "
+                            "(ex: 650000, 650.000 ou 650,000)."
                         )
             finally:
+                # se não deu rerun lá em cima, garante que desliga a flag
                 ss["is_saving"] = False
 
         pending = ss.get("pending_update")
@@ -746,7 +729,11 @@ def render():
                 on_click=lambda: ss.update(price_action="cancel_update"),
             )
 
-    st.markdown("---")
+        st.markdown("---")
+
+    else:
+        # Demo: só separador para ir pros KPIs / gráficos
+        st.markdown("---")
 
     # ======================================================
     #  KPIs do item selecionado
@@ -914,7 +901,6 @@ def render():
             y_max = float(max_5) * 1.02
 
             spark_data = hist_last5.copy()
-            spark_data["date"] = pd.to_datetime(spark_data["date"])
             spark_data["date_str"] = spark_data["date"].dt.strftime("%Y-%m-%d")
 
             spark = (
