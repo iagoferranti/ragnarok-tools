@@ -9,12 +9,8 @@ def render():
 
     ss = st.session_state
 
-    # ======================================================
-    #   1) DETECTA MODO DEMO
-    # ======================================================
+    # 1) DETECTA MODO DEMO
     raw_demo = st.query_params.get("demo", None)
-
-    # st.query_params pode retornar ["1"] ou "1"
     if isinstance(raw_demo, list):
         raw_demo = raw_demo[0]
 
@@ -22,6 +18,7 @@ def render():
 
     # 🚨 Se for DEMO → pula tudo e vai direto para o Monitor
     if demo_mode:
+        ss["demo_mode"] = True          # <<< NOVO
         ss["auth_ok"] = True
         ss["user_email"] = "demo@preview"
         ss["username"] = "demo_preview"
