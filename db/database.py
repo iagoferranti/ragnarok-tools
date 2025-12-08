@@ -92,33 +92,50 @@ def to_int_or_none(value):
 
 # ======================================================
 #  Função para checar preço existente
+#  (agora considerando variation_key)
 # ======================================================
-def get_existing_price(item_id: int, date_str: str) -> int | None:
+def get_existing_price(
+    item_id: int,
+    date_str: str,
+    variation_key: str | None = None,
+) -> int | None:
     """
-    Retorna o preço já cadastrado para (item_id, date),
-    ou None se não existir.
+    Retorna o preço já cadastrado para (item_id, date, variation_key).
+    Se variation_key não for informado, usa string vazia (variação padrão).
     """
+    vk = variation_key or ""
+
     df = query_df(
         """
         SELECT price_zeny
         FROM prices
         WHERE item_id = %s
-          AND date = %s;
+          AND date = %s
+          AND variation_key = %s
+        ORDER BY created_at DESC
+        LIMIT 1;
         """,
-        (item_id, date_str),
+        (item_id, date_str, vk),
     )
+
     if df.empty:
         return None
-    return int(df.loc[0, "price_zeny"])
+
+    return int(df.iloc[0]["price_zeny"])
 
 
 # ======================================================
 #  Função para atualizar preço existente
 # ======================================================
-def update_price(item_id: int, date_str: str, price_zeny: float):
+def update_price(
+    item_id: int,
+    date_str: str,
+    price_zeny: float,
+    variation_key: str = "",
+):
     """
-    Atualiza o preço de um item em um dia específico.
-    Usada quando o usuário confirma que quer sobrescrever.
+    Atualiza o preço de um item em um dia específico
+    para uma DETERMINADA variação (variation_key).
     """
     if price_zeny <= 0:
         raise ValueError("price_zeny deve ser > 0")
@@ -129,9 +146,10 @@ def update_price(item_id: int, date_str: str, price_zeny: float):
            SET price_zeny = %s,
                updated_at = NOW()
          WHERE item_id = %s
-           AND date = %s;
+           AND date = %s
+           AND variation_key = %s;
         """,
-        (price_zeny, item_id, date_str),
+        (price_zeny, item_id, date_str, variation_key or ""),
     )
 
     # Limpa cache de leitura após alteração
@@ -144,23 +162,40 @@ def update_price(item_id: int, date_str: str, price_zeny: float):
 def log_price_change(
     item_id: int,
     date_str: str,
-    old_price_zeny: int,
+    old_price_zeny: int | None,
     new_price_zeny: int,
     changed_by: str,
     source: str = "DIRECT_ADMIN",
+    refine: int | None = None,
+    card_ids: str | None = None,
+    extra_desc: str | None = None,
+    variation_key: str | None = None,
 ):
     """
     Registra um log simples de alteração de preço.
     Usa tabela price_change_logs (se existir).
+    Agora inclui campos de variação (refine, card_ids, extra_desc, variation_key).
     """
     try:
         execute(
             """
             INSERT INTO price_change_logs
-                (item_id, date, old_price_zeny, new_price_zeny, changed_by, source)
-            VALUES (%s, %s, %s, %s, %s, %s);
+                (item_id, date, old_price_zeny, new_price_zeny,
+                 changed_by, source, refine, card_ids, extra_desc, variation_key)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """,
-            (item_id, date_str, old_price_zeny, new_price_zeny, changed_by, source),
+            (
+                item_id,
+                date_str,
+                old_price_zeny,
+                new_price_zeny,
+                changed_by,
+                source,
+                refine,
+                card_ids,
+                extra_desc,
+                variation_key or "",
+            ),
         )
     except Exception as e:
         # Não queremos quebrar nada se essa tabela não existir ainda
@@ -169,6 +204,7 @@ def log_price_change(
 
 # ======================================================
 #  Inicialização do schema (somente manual)
+#  (mantida simples, já que hoje você cria as tabelas via script SQL separado)
 # ======================================================
 def init_db():
     """Cria tabelas base no PostgreSQL (roda só via script/init_supabase.py)."""
@@ -179,13 +215,19 @@ def init_db():
     );
     """
 
+    # Versão atualizada da tabela prices para novos ambientes
     q_prices = """
     CREATE TABLE IF NOT EXISTS prices (
-        id         SERIAL PRIMARY KEY,
-        item_id    INTEGER NOT NULL REFERENCES items(id),
-        date       DATE NOT NULL,
-        price_zeny INTEGER NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        id            SERIAL PRIMARY KEY,
+        item_id       INTEGER NOT NULL REFERENCES items(id),
+        date          DATE NOT NULL,
+        price_zeny    INTEGER NOT NULL,
+        refine        INTEGER NOT NULL DEFAULT 0,
+        card_ids      TEXT,
+        extra_desc    TEXT,
+        variation_key TEXT NOT NULL DEFAULT '',
+        created_at    TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at    TIMESTAMP
     );
     """
 
@@ -236,7 +278,11 @@ def _get_all_prices_df_cached() -> pd.DataFrame:
             p.item_id,
             i.name AS item_name,
             p.date,
-            p.price_zeny
+            p.price_zeny,
+            p.refine,
+            p.card_ids,
+            p.extra_desc,
+            p.variation_key
         FROM prices p
         JOIN items i ON i.id = p.item_id;
         """
@@ -247,17 +293,47 @@ def get_all_prices_df() -> pd.DataFrame:
     return _get_all_prices_df_cached().copy()
 
 
-def insert_price(item_id: int, date_str: str, price_zeny: float):
+def insert_price(
+    item_id: int,
+    date_str: str,
+    price_zeny: int,
+    refine: int | None = 0,
+    card_ids: list[int] | None = None,
+    extra_desc: str | None = None,
+    variation_key: str | None = None,
+):
     """
     Insere um preço no histórico.
-    Assumimos que (item_id, date) ainda NÃO existe.
+    Assumimos que (item_id, date, variation_key) ainda NÃO existe.
+
+    OBS:
+      - refine / card_ids / extra_desc / variation_key têm default,
+        então chamadas antigas com 3 parâmetros continuam funcionando
+        (variação "default": variation_key = "").
     """
+
+    # garante que refine nunca vai como NULL
+    if refine is None:
+        refine = 0
+
     if price_zeny <= 0:
         raise ValueError("price_zeny deve ser > 0")
 
+    vk = variation_key or ""
+
+    # Converte card_ids (lista) para string, pois a coluna é text
+    if isinstance(card_ids, list):
+        card_ids_db = ",".join(map(str, card_ids)) if card_ids else None
+    else:
+        card_ids_db = card_ids  # já é string ou None
+
     execute(
-        "INSERT INTO prices (item_id, date, price_zeny) VALUES (%s, %s, %s);",
-        (item_id, date_str, int(price_zeny)),
+        """
+        INSERT INTO prices
+            (item_id, date, price_zeny, refine, card_ids, extra_desc, variation_key)
+        VALUES (%s, %s, %s, %s, %s, %s, %s);
+        """,
+        (item_id, date_str, int(price_zeny), refine, card_ids_db, extra_desc, vk),
     )
 
     # Descobre quem é o usuário (uma vez só)
@@ -274,10 +350,16 @@ def insert_price(item_id: int, date_str: str, price_zeny: float):
             date_str=date_str,
             action_type="insert",
             actor_email=user_email,
-            actor_role="admin" if user_email in st.secrets["roles"]["admins"] else "user",
+            actor_role="admin"
+            if user_email in st.secrets["roles"]["admins"]
+            else "user",
             old_price=None,
             new_price=int(price_zeny),
             request_id=None,
+            refine=refine,
+            card_ids=card_ids_db,
+            extra_desc=extra_desc,
+            variation_key=vk,
         )
     except Exception as e:
         print(f"[WARN] Falha ao logar insert em price_audit_log: {e}")
@@ -291,6 +373,10 @@ def insert_price(item_id: int, date_str: str, price_zeny: float):
             new_price_zeny=int(price_zeny),
             changed_by=user_email,
             source="INSERT",
+            refine=refine,
+            card_ids=card_ids_db,
+            extra_desc=extra_desc,
+            variation_key=vk,
         )
     except Exception as e:
         print(f"[WARN] Falha ao logar criação de preço: {e}")
@@ -299,6 +385,25 @@ def insert_price(item_id: int, date_str: str, price_zeny: float):
     st.cache_data.clear()
 
 
+def delete_price(item_id: int, date_str: str, variation_key: str | None) -> None:
+    """
+    Remove o registro único de preço de (item_id, date, variation_key).
+    Como em todo o resto do código, tratamos variation_key None como string vazia ("").
+    """
+    vk = variation_key or ""
+
+    execute(
+        """
+        DELETE FROM prices
+        WHERE item_id = %s
+          AND date = %s
+          AND variation_key = %s;
+        """,
+        (item_id, date_str, vk),
+    )
+
+    # Limpa caches para refletir o delete na UI
+    st.cache_data.clear()
 
 
 # ======================================================
@@ -313,18 +418,25 @@ def log_price_action(
     old_price: int | None = None,
     new_price: int | None = None,
     request_id: int | None = None,
+    refine: int | None = None,
+    card_ids: str | None = None,
+    extra_desc: str | None = None,
+    variation_key: str | None = None,
 ):
     """
     Grava um log de qualquer ação de preço.
     action_type: insert | update | delete | request_create | request_approve | request_reject
     Usa tabela price_audit_log (se existir).
+    Agora registra também os campos de variação.
     """
     try:
         execute(
             """
             INSERT INTO price_audit_log
-                (item_id, date, action_type, old_price, new_price, actor_email, actor_role, request_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+                (item_id, date, action_type, old_price, new_price,
+                 actor_email, actor_role, request_id,
+                 refine, card_ids, extra_desc, variation_key)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """,
             (
                 item_id,
@@ -335,6 +447,10 @@ def log_price_action(
                 actor_email,
                 actor_role,
                 request_id,
+                refine,
+                card_ids,
+                extra_desc,
+                variation_key or "",
             ),
         )
     except Exception as e:
@@ -348,9 +464,16 @@ def create_price_change_request(
     new_price_zeny: int,
     requested_by: str,
     reason: str | None = None,
+    refine: int | None = None,
+    card_ids: str | None = None,
+    extra_desc: str | None = None,
+    variation_key: str | None = None,
 ) -> int:
     """
     Cria um pedido de alteração e retorna seu ID.
+
+    OBS: refine / card_ids / extra_desc / variation_key têm default,
+    então chamadas antigas continuam válidas.
     """
     conn = psycopg2.connect(
         user=DB_USER,
@@ -360,14 +483,27 @@ def create_price_change_request(
         dbname=DB_NAME,
     )
     cur = conn.cursor()
+    vk = variation_key or ""
     cur.execute(
         """
         INSERT INTO price_change_requests
-            (item_id, date, old_price, new_price, reason, created_by)
-        VALUES (%s, %s, %s, %s, %s, %s)
+            (item_id, date, old_price, new_price,
+             reason, created_by, refine, card_ids, extra_desc, variation_key)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id;
         """,
-        (item_id, date_str, old_price_zeny, new_price_zeny, reason, requested_by),
+        (
+            item_id,
+            date_str,
+            old_price_zeny,
+            new_price_zeny,
+            reason,
+            requested_by,
+            refine,
+            card_ids,
+            extra_desc,
+            vk,
+        ),
     )
     req_id = cur.fetchone()[0]
     conn.commit()
@@ -385,6 +521,10 @@ def create_price_change_request(
             old_price=old_price_zeny,
             new_price=new_price_zeny,
             request_id=req_id,
+            refine=refine,
+            card_ids=card_ids,
+            extra_desc=extra_desc,
+            variation_key=vk,
         )
     except Exception as e:
         print(f"[WARN] Falha ao gravar em price_audit_log (create): {e}")
@@ -428,9 +568,13 @@ def approve_price_request(
     date_str = str(row["date"])
     old_price = int(row["old_price"]) if row["old_price"] is not None else None
     new_price = int(row["new_price"])
+    refine = to_int_or_none(row.get("refine"))
+    card_ids = row.get("card_ids")
+    extra_desc = row.get("extra_desc")
+    variation_key = row.get("variation_key") or ""
 
     # 2. Atualiza preço real
-    update_price(item_id, date_str, new_price)
+    update_price(item_id, date_str, new_price, variation_key=variation_key)
 
     # 3. Marca solicitação como aprovada
     execute(
@@ -454,6 +598,10 @@ def approve_price_request(
         old_price=old_price,
         new_price=new_price,
         request_id=request_id,
+        refine=refine,
+        card_ids=card_ids,
+        extra_desc=extra_desc,
+        variation_key=variation_key,
     )
 
     # 5. Log simples de alteração efetiva (price_change_logs), se existir
@@ -465,10 +613,13 @@ def approve_price_request(
             new_price_zeny=new_price,
             changed_by=reviewer_email,
             source="REQUEST_APPROVED",
+            refine=refine,
+            card_ids=card_ids,
+            extra_desc=extra_desc,
+            variation_key=variation_key,
         )
     except Exception as e:
         print(f"[WARN] Falha ao gravar em price_change_logs na aprovação: {e}")
-
 
 
 def reject_price_request(
@@ -493,7 +644,12 @@ def reject_price_request(
 
     # Log da rejeição
     df = query_df(
-        "SELECT item_id, date, old_price, new_price FROM price_change_requests WHERE id = %s;",
+        """
+        SELECT item_id, date, old_price, new_price,
+               refine, card_ids, extra_desc, variation_key
+        FROM price_change_requests
+        WHERE id = %s;
+        """,
         (request_id,),
     )
 
@@ -503,6 +659,10 @@ def reject_price_request(
         date_str = str(row["date"])
         old_price = to_int_or_none(row["old_price"])
         new_price = to_int_or_none(row["new_price"])
+        refine = to_int_or_none(row.get("refine"))
+        card_ids = row.get("card_ids")
+        extra_desc = row.get("extra_desc")
+        variation_key = row.get("variation_key") or ""
 
         log_price_action(
             item_id=item_id,
@@ -513,6 +673,10 @@ def reject_price_request(
             old_price=old_price,
             new_price=new_price,
             request_id=request_id,
+            refine=refine,
+            card_ids=card_ids,
+            extra_desc=extra_desc,
+            variation_key=variation_key,
         )
 
     # Limpa caches (inclusive lista de pendentes)

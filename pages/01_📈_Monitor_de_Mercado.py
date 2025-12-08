@@ -19,12 +19,69 @@ from db.database import (
     log_price_action,
     get_pending_requests,
 )
-
 from services.market import compute_summary
 
 # ============================================
 #  Tema / layout base
 # ============================================
+st.markdown(
+    """
+    <style>
+    /* Layout das colunas do st.dataframe (nova estrutura) */
+
+    /* 1ª coluna: Item */
+    div[data-testid="stDataFrame"] div[role="row"] > div:nth-child(1) {
+        min-width: 260px !important;
+        max-width: 340px !important;
+        white-space: nowrap;
+    }
+
+    /* 2ª coluna: Cartas */
+    div[data-testid="stDataFrame"] div[role="row"] > div:nth-child(2) {
+        min-width: 220px !important;
+        max-width: 320px !important;
+        white-space: nowrap;
+    }
+
+    /* 3ª coluna: Última data */
+    div[data-testid="stDataFrame"] div[role="row"] > div:nth-child(3) {
+        min-width: 120px !important;
+        max-width: 140px !important;
+        white-space: nowrap;
+    }
+
+    /* 4ª coluna: Últ. preço */
+    div[data-testid="stDataFrame"] div[role="row"] > div:nth-child(4) {
+        min-width: 130px !important;
+        max-width: 150px !important;
+        white-space: nowrap;
+    }
+
+    /* 5ª coluna: Média 5d */
+    div[data-testid="stDataFrame"] div[role="row"] > div:nth-child(5) {
+        min-width: 130px !important;
+        max-width: 150px !important;
+        white-space: nowrap;
+    }
+
+    /* 6ª coluna: Var % vs 5d */
+    div[data-testid="stDataFrame"] div[role="row"] > div:nth-child(6) {
+        min-width: 130px !important;
+        max-width: 150px !important;
+        white-space: nowrap;
+    }
+
+    /* 7ª coluna: Status */
+    div[data-testid="stDataFrame"] div[role="row"] > div:nth-child(7) {
+        min-width: 110px !important;
+        max-width: 130px !important;
+        white-space: nowrap;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 apply_theme("Monitor de Mercado – Ragnarok LATAM", page_icon="📈")
 
 
@@ -60,21 +117,180 @@ def get_all_prices_cached() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def get_price_history_cached(item_id: int) -> pd.DataFrame:
-    return get_price_history_df(item_id)
+def get_price_history_cached(item_id: int, variation_key: str | None) -> pd.DataFrame:
+    """
+    Wrapper cacheado para histórico.
+    Se variation_key for informado, filtra; caso contrário, retorna histórico completo do item.
+    """
+    df = get_price_history_df(item_id)
+    if variation_key:
+        df = df[df["variation_key"] == variation_key]
+    return df.copy()
+
+
+def build_display_name(
+    item_name: str,
+    refine: int | None,
+    card_ids,
+    extra_desc: str | None,
+    card_id_to_name: dict[int, str],
+) -> str:
+    """
+    Monta o nome exibido no dashboard:
+    Ex: "Memorável Vingança dos Mortos — +12 | IT 6, Sorte +3, Sor +3 | Cartas: Louva-a-deus Angra"
+    - card_ids pode ser lista[int] OU string "4513,4520"
+    """
+    parts: list[str] = []
+
+    # refino
+    if refine is not None:
+        try:
+            r = int(refine)
+        except Exception:
+            r = None
+        if r and r > 0:
+            parts.append(f"+{r}")
+
+    # extra / encantos
+    if isinstance(extra_desc, str) and extra_desc.strip():
+        parts.append(extra_desc.strip())
+
+    # cartas
+    ids_list: list[int] = []
+    if isinstance(card_ids, list):
+        ids_list = [int(c) for c in card_ids if c is not None]
+    elif isinstance(card_ids, str) and card_ids.strip():
+        for tok in card_ids.split(","):
+            tok = tok.strip()
+            if tok:
+                try:
+                    ids_list.append(int(tok))
+                except ValueError:
+                    # se vier lixo, ignora aquele token
+                    pass
+
+    if ids_list:
+        labels = [card_id_to_name.get(cid, str(cid)) for cid in ids_list]
+        parts.append("Cartas: " + ", ".join(labels))
+
+    if parts:
+        return f"{item_name} — " + " | ".join(parts)
+    else:
+        return item_name
 
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_global_summary_cached() -> pd.DataFrame:
+    """
+    Resumo global por VARIAÇÃO do item (cada combinação refino+cartas+extra vira uma linha).
+    Agora já devolve também uma coluna 'Cartas' agregada
+    (ex: "2x Carta Louva-a-deus Angra, 1x Carta Cavaleiro do Abismo").
+    """
     df_prices_all = get_all_prices_cached()
     if df_prices_all.empty:
         return pd.DataFrame()
-    df_summary_input = df_prices_all.rename(columns={"item_name": "item"})
-    return compute_summary(df_summary_input)
+
+    # Mapa id -> nome (para cartas / display)
+    items_df = get_items_cached()
+    card_id_to_name = dict(zip(items_df["id"], items_df["name"]))
+
+    df = df_prices_all.copy()
+
+    # Nome exibido levando em conta refino, cartas e encantos
+    df["item_display"] = df.apply(
+        lambda r: build_display_name(
+            item_name=r["item_name"],
+            refine=r.get("refine"),
+            card_ids=r.get("card_ids"),
+            extra_desc=r.get("extra_desc"),
+            card_id_to_name=card_id_to_name,
+        ),
+        axis=1,
+    )
+
+    # Garante coluna variation_key
+    if "variation_key" not in df.columns:
+        df["variation_key"] = "base"
+    df["variation_key"] = df["variation_key"].fillna("base")
+
+    # Cada combinação (item_id + variation_key) vira um "item" independente
+    df["item_id_var"] = df["item_id"].astype(str) + "|" + df["variation_key"]
+
+    # ---- Cartas agregadas por variação (para o resumo) ----
+    df["date_parsed"] = pd.to_datetime(df["date"])
+
+    last_per_var = (
+        df.sort_values("date_parsed")
+        .groupby("item_id_var", as_index=False)
+        .last()
+    )
+
+    from collections import Counter
+
+    def summarize_cards(card_ids_raw):
+        ids_list: list[int] = []
+        if isinstance(card_ids_raw, list):
+            ids_list = [int(c) for c in card_ids_raw if c is not None]
+        elif isinstance(card_ids_raw, str) and card_ids_raw.strip():
+            for tok in card_ids_raw.split(","):
+                tok = tok.strip()
+                if tok:
+                    try:
+                        ids_list.append(int(tok))
+                    except ValueError:
+                        pass
+
+        if not ids_list:
+            return "-"
+
+        counts = Counter(ids_list)
+        labels: list[str] = []
+        for cid, qty in counts.items():
+            name = card_id_to_name.get(cid, str(cid))
+            labels.append(f"{qty}x {name}")
+        return ", ".join(labels)
+
+    last_per_var["Cartas"] = last_per_var["card_ids"].apply(summarize_cards)
+
+    df_cards_agg = last_per_var[["item_id_var", "item_display", "Cartas"]].rename(
+        columns={"item_display": "Item"}
+    )
+
+    # ---- DataFrame de entrada para compute_summary ----
+    df_summary_input = df[
+        ["item_id_var", "item_display", "date", "price_zeny"]
+    ].rename(
+        columns={
+            "item_id_var": "item_id",
+            "item_display": "item",
+        }
+    )
+
+    df_summary = compute_summary(df_summary_input)
+
+    # Merge das cartas no resumo global
+    df_summary = df_summary.merge(
+        df_cards_agg[["item_id_var", "Cartas"]]
+        .rename(columns={"item_id_var": "Item ID"}),
+        left_on="Item ID",
+        right_on="Item ID",
+        how="left",
+    ) if "Item ID" in df_summary.columns else df_summary.merge(
+        df_cards_agg[["Item", "Cartas"]],
+        on="Item",
+        how="left",
+    )
+
+    if "Cartas" not in df_summary.columns:
+        df_summary["Cartas"] = "-"
+
+    df_summary["Cartas"] = df_summary["Cartas"].fillna("-")
+
+    return df_summary
 
 
 # ============================================
-#  Helpers
+#  Helpers de formatação
 # ============================================
 def fmt_zeny(v: float | int | None) -> str:
     if v is None or pd.isna(v):
@@ -92,10 +308,7 @@ def fmt_pct(v: float | None, sinal: bool = True) -> str:
 
 def style_market_table(df: pd.DataFrame):
     """
-    Aplica cores em:
-    - Coluna de variação percentual (nome pode ser 'Variação % vs média 5'
-      ou 'Var % vs 5d', dependendo da tabela)
-    - Status ('Vender' em vermelho, 'Comprar' em verde)
+    Aplica cores nas colunas de variação e Status.
     """
 
     def color_var(val):
@@ -107,9 +320,9 @@ def style_market_table(df: pd.DataFrame):
         except ValueError:
             return ""
         if num > 0:
-            return "color:#22c55e;"  # verde
+            return "color:#22c55e;"
         if num < 0:
-            return "color:#ef4444;"  # vermelho
+            return "color:#ef4444;"
         return ""
 
     def color_status(val):
@@ -136,32 +349,77 @@ def style_market_table(df: pd.DataFrame):
     return styler
 
 
+def build_variation_key(refine: int, cards: list[int] | None, extra: str | None) -> str:
+    """
+    Gera chave de variação determinística para diferenciar:
+    - refinos
+    - combinações de cartas
+    - encantos / observações
+    """
+    parts: list[str] = []
+
+    # refino
+    parts.append(f"r{int(refine)}")
+
+    # cartas (ordenadas e únicas)
+    if cards:
+        cards_sorted = sorted(set(cards))
+        cards_str = "-".join(str(cid) for cid in cards_sorted)
+        parts.append(f"c{cards_str}")
+
+    # extra (normalizado, sem acento, lower)
+    if extra:
+        norm = normalize_text(extra).replace("|", " ").strip()
+        if norm:
+            parts.append(f"e{norm}")
+
+    return "|".join(parts)
+
+
+def describe_variation(
+    refine: int,
+    cards: list[int] | None,
+    extra: str | None,
+    card_id_to_name: dict[int, str],
+) -> str:
+    """
+    Descrição amigável p/ avisos de conflito.
+    """
+    parts: list[str] = []
+
+    if refine:
+        parts.append(f"+{int(refine)}")
+
+    if cards:
+        labels = [card_id_to_name.get(cid, str(cid)) for cid in cards]
+        parts.append("Cartas: " + ", ".join(labels))
+
+    if extra and extra.strip():
+        parts.append(extra.strip())
+
+    if not parts:
+        return "Padrão (sem refino / cartas / encantos)"
+
+    return " | ".join(parts)
+
+
 # ============================================
 #  Página principal
 # ============================================
 def render():
-    # --- Modo demo via query string (?demo=1) ---
     ss = st.session_state
 
-    # --- Modo demo: lê querystring UMA vez e nunca derruba se já estiver True ---
-    prev_demo = bool(ss.get("demo_mode", False))
-
-    raw_demo = st.query_params.get("demo", None)
-    if isinstance(raw_demo, list):
-        raw_demo = raw_demo[0]
-
-    if raw_demo == "1":
-        demo_mode = True
-    else:
-        # se já estava em demo na sessão, mantém
-        demo_mode = prev_demo
-
-    ss["demo_mode"] = demo_mode  # sempre persiste
-
-    # Se NÃO for demo, exige autenticação normal
-    if not demo_mode and not ss.get("auth_ok", False):
-        st.warning("Você não está autenticado. Faça login para continuar.")
-        st.stop()
+    # -------------------------------------------------
+    # RESET DE CAMPOS DE VARIAÇÃO (rodado ANTES DOS WIDGETS)
+    # -------------------------------------------------
+    if ss.get("reset_variation_fields", False):
+        ss["var_refine"] = 0
+        ss["var_extra_desc"] = ""
+        ss["var_card_slot_1"] = "(vazio)"
+        ss["var_card_slot_2"] = "(vazio)"
+        ss["var_card_slot_3"] = "(vazio)"
+        ss["var_card_slot_4"] = "(vazio)"
+        ss["reset_variation_fields"] = False
 
     st.title("📈 Monitor de Mercado – Ragnarok LATAM")
 
@@ -219,71 +477,18 @@ def render():
     if "pending_update" not in ss:
         ss["pending_update"] = None
     if "price_action" not in ss:
-        ss["price_action"] = None  # "confirm_update" | "cancel_update" | None
-
-    # ---------------------------------------
-    # Barra superior: usuário logado + sininho (se admin)
-    # ---------------------------------------
-    if demo_mode:
-        user_display = "demo@preview"
-    else:
-        user_display = ss.get("user_email") or ss.get("username") or "desconhecido"
-
-    col_user, col_notif = st.columns([4, 1])
-
-    with col_user:
-        st.markdown(
-            f"""
-            <div style="
-                margin-bottom: 0.75rem;
-                padding: 0.4rem 0.75rem;
-                border-radius: 0.6rem;
-                font-size: 0.9rem;
-                background-color: rgba(15,23,42,0.85);
-                border: 1px solid rgba(148,163,184,0.4);
-                display: inline-flex;
-                align-items: center;
-                gap: 0.4rem;
-            ">
-                <span>👤</span>
-                <span>Logado como <strong>{user_display}</strong></span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with col_notif:
-        if not demo_mode and is_admin():
-            try:
-                df_req = get_pending_requests()
-                n_pending = len(df_req)
-            except Exception as e:
-                print(f"[WARN] Falha ao carregar pending_requests: {e}")
-                n_pending = 0
-
-            if n_pending > 0:
-                label = f"🔔 {n_pending}"
-                help_txt = "Ver solicitações de alteração pendentes"
-                disabled = False
-            else:
-                label = "🔔 0"
-                help_txt = "Nenhuma solicitação pendente"
-                disabled = True
-
-            notif_clicked = st.button(
-                label,
-                key="btn_admin_requests",
-                help=help_txt,
-                disabled=disabled,
-            )
-
-            if notif_clicked and not disabled:
-                st.switch_page("pages/02_🛠️_Admin_Solicitações.py")
-        else:
-            st.empty()
+        ss["price_action"] = None
+    if "var_refine" not in ss:
+        ss["var_refine"] = 0
+    if "var_extra_desc" not in ss:
+        ss["var_extra_desc"] = ""
+    for i in range(1, 5):
+        key = f"var_card_slot_{i}"
+        if key not in ss:
+            ss[key] = "(vazio)"
 
     # ------------------------------
-    #  Carrega itens e preços (COM CACHE)
+    #  Carrega itens e preços
     # ------------------------------
     items_df = get_items_cached()
     if items_df.empty:
@@ -292,9 +497,7 @@ def render():
 
     df_prices_all = get_all_prices_cached()
 
-    # ------------------------------------------------------
-    #  Agrupa itens com o MESMO name em um item "canônico"
-    # ------------------------------------------------------
+    # Itens "canônicos" por nome
     items_df_sorted = items_df.sort_values("id")
     items_canonical = (
         items_df_sorted.groupby("name", as_index=False).first()[["id", "name"]]
@@ -305,171 +508,145 @@ def render():
         name = row["name"]
         item_list.append(
             {
-                "id": int(row["id"]),  # id CANÔNICO
+                "id": int(row["id"]),
                 "name": name,
                 "norm": normalize_text(name),
             }
         )
 
+    # Lista de cartas
+    cards_df = items_df_sorted[
+        items_df_sorted["name"].str.contains("carta", case=False, na=False)
+    ]
+    cards_list: list[dict] = []
+    for row in cards_df.to_dict(orient="records"):
+        name = row["name"]
+        cards_list.append(
+            {
+                "id": int(row["id"]),
+                "name": name,
+                "norm": normalize_text(name),
+            }
+        )
+    card_id_to_name: dict[int, str] = {c["id"]: c["name"] for c in cards_list}
+
     # ======================================================
-    #  MODO DEMO: item com histórico, sem busca / cadastro
+    #  Seleção de item (somente fluxo normal, sem demo)
     # ======================================================
     item_selected = None
 
-    if demo_mode:
-        # pega todos os preços cadastrados (já carregados acima)
-        if df_prices_all.empty:
-            st.warning("Ainda não há histórico de preços para mostrar no modo demo.")
-            return
+    col_search, col_btn_search = st.columns([4, 1])
 
+    with col_search:
+        query = st.text_input(
+            "🔎 Buscar item",
+            placeholder="Ex: edic, pocao, poçao, poção...",
+            key="search_item",
+        )
 
-        # ids de itens que já têm histórico
-        ids_with_history = sorted(df_prices_all["item_id"].unique())
+    with col_btn_search:
+        st.markdown("<div style='height: 1.75rem'></div>", unsafe_allow_html=True)
+        st.button(
+            "Buscar",
+            key="btn_search_item",
+            use_container_width=True,
+            help="Clique aqui ou pressione Enter após digitar para buscar o item",
+        )
 
-        # mapeia para a lista de itens já montada (item_list)
-        id_to_item = {it["id"]: it for it in item_list}
-        historical_items = [
-            id_to_item[i] for i in ids_with_history if i in id_to_item
+    query_norm = normalize_text(query)
+    filtered_items = item_list
+
+    if query_norm:
+        starts = [it for it in item_list if it["norm"].startswith(query_norm)]
+        contains = [
+            it
+            for it in item_list
+            if (query_norm in it["norm"]) and (it not in starts)
         ]
+        filtered_items = starts + contains
 
-        if not historical_items:
-            st.warning(
-                "Nenhum dos itens com preço no histórico foi encontrado na base de itens."
-            )
+        if not filtered_items:
+            st.warning("Nenhum item encontrado para esse termo de busca.")
             return
 
-        st.markdown("### 📦 Itens com histórico")
+        n = len(filtered_items)
 
-        # Combobox alinhado à esquerda (em 50% da largura)
-        col_left, col_mid = st.columns([3, 7])
-        with col_left:
-            item_selected = st.selectbox(
-                "",
-                options=historical_items,
-                format_func=lambda it: f"{it['name']} ({it['id']})",
-                key="demo_select_item",
-                label_visibility="collapsed",
+        if n == 1:
+            item_selected = filtered_items[0]
+            st.info(
+                f"Item selecionado automaticamente: "
+                f"**{item_selected['name']} ({item_selected['id']})**"
+            )
+        elif n <= 10:
+            st.warning("Foram encontrados vários itens, selecione o correto:")
+
+            labels = [f"{it['name']} ({it['id']})" for it in filtered_items]
+            choice = st.radio(
+                "Itens encontrados:",
+                options=labels,
+                key="search_radio",
+            )
+            idx = labels.index(choice)
+            item_selected = filtered_items[idx]
+
+        elif n <= 300:
+            st.warning(
+                f"Foram encontrados **{n} itens** para esse termo. "
+                f"Você pode refinar a busca (ex: `pocao branca`) "
+                f"ou escolher na lista abaixo."
             )
 
-    else:
-        # ------------------------------
-        #  BUSCA: campo + botão "Buscar"
-        # ------------------------------
-        col_search, col_btn_search = st.columns([4, 1])
-
-        with col_search:
-            query = st.text_input(
-                "🔎 Buscar item",
-                placeholder="Ex: edic, pocao, poçao, poção...",
-                key="search_item",
-            )
-
-        with col_btn_search:
-            st.markdown("<div style='height: 1.75rem'></div>", unsafe_allow_html=True)
-            st.button(
-                "Buscar",
-                key="btn_search_item",
-                use_container_width=True,
-                help="Clique aqui ou pressione Enter após digitar para buscar o item",
-            )
-
-        query_norm = normalize_text(query)
-        filtered_items = item_list
-
-        if query_norm:
-            starts = [it for it in item_list if it["norm"].startswith(query_norm)]
-            contains = [
-                it
-                for it in item_list
-                if (query_norm in it["norm"]) and (it not in starts)
-            ]
-            filtered_items = starts + contains
-
-            if not filtered_items:
-                st.warning("Nenhum item encontrado para esse termo de busca.")
-                return
-
-            n = len(filtered_items)
-
-            if n == 1:
-                item_selected = filtered_items[0]
-                st.info(
-                    f"Item selecionado automaticamente: "
-                    f"**{item_selected['name']} ({item_selected['id']})**"
-                )
-            elif n <= 10:
-                st.warning("Foram encontrados vários itens, selecione o correto:")
-
-                labels = [f"{it['name']} ({it['id']})" for it in filtered_items]
-                choice = st.radio(
-                    "Itens encontrados:",
-                    options=labels,
-                    key="search_radio",
-                )
-                idx = labels.index(choice)
-                item_selected = filtered_items[idx]
-
-            elif n <= 300:
-                st.warning(
-                    f"Foram encontrados **{n} itens** para esse termo. "
-                    f"Você pode refinar a busca (ex: `pocao branca`) "
-                    f"ou escolher na lista abaixo."
-                )
-
-                labels = [f"{it['name']} ({it['id']})" for it in filtered_items]
-                label_to_item = {lbl: it for lbl, it in zip(labels, filtered_items)}
-
-                col_item, _, _, _ = st.columns([3, 2, 2, 1])
-                with col_item:
-                    choice = st.selectbox(
-                        "Itens encontrados:",
-                        options=labels,
-                        key="search_select_filtered",
-                        label_visibility="collapsed",
-                    )
-
-                item_selected = label_to_item[choice]
-            else:
-                st.warning(
-                    f"Foram encontrados **{n} itens**. "
-                    "Refine sua busca adicionando mais termos, "
-                    "por exemplo: `pocao branca pequena`."
-                )
-                return
-        else:
-            filtered_items = item_list
-            if not filtered_items:
-                st.warning("Nenhum item encontrado. Verifique o arquivo items.json.")
-                return
-
-            selectbox_kwargs: dict = {}
-            default_item_id = None
-            if not df_prices_all.empty:
-                df_tmp = df_prices_all.copy()
-                df_tmp["date_parsed"] = pd.to_datetime(df_tmp["date"])
-                last_row = df_tmp.sort_values("date_parsed", ascending=False).iloc[0]
-                default_item_id = int(last_row["item_id"])
-
-            if default_item_id is not None:
-                for i, it in enumerate(filtered_items):
-                    if it["id"] == default_item_id:
-                        selectbox_kwargs["index"] = i
-                        break
+            labels = [f"{it['name']} ({it['id']})" for it in filtered_items]
+            label_to_item = {lbl: it for lbl, it in zip(labels, filtered_items)}
 
             col_item, _, _, _ = st.columns([3, 2, 2, 1])
             with col_item:
-                item_selected = st.selectbox(
-                    "",
-                    options=filtered_items,
-                    format_func=lambda it: f"{it['name']} ({it['id']})",
-                    key="search_select",
+                choice = st.selectbox(
+                    "Itens encontrados:",
+                    options=labels,
+                    key="search_select_filtered",
                     label_visibility="collapsed",
-                    **selectbox_kwargs,
                 )
 
-    # ------------------------------------------------------
-    # Se ainda não tem item, encerra
-    # ------------------------------------------------------
+            item_selected = label_to_item[choice]
+        else:
+            st.warning(
+                f"Foram encontrados **{n} itens**. "
+                "Refine sua busca adicionando mais termos, "
+                "por exemplo: `pocao branca pequena`."
+            )
+            return
+    else:
+        filtered_items = item_list
+        if not filtered_items:
+            st.warning("Nenhum item encontrado. Verifique o arquivo items.json.")
+            return
+
+        selectbox_kwargs: dict = {}
+        default_item_id = None
+        if not df_prices_all.empty:
+            df_tmp = df_prices_all.copy()
+            df_tmp["date_parsed"] = pd.to_datetime(df_tmp["date"])
+            last_row = df_tmp.sort_values("date_parsed", ascending=False).iloc[0]
+            default_item_id = int(last_row["item_id"])
+
+        if default_item_id is not None:
+            for i, it in enumerate(filtered_items):
+                if it["id"] == default_item_id:
+                    selectbox_kwargs["index"] = i
+                    break
+
+        col_item, _, _, _ = st.columns([3, 2, 2, 1])
+        with col_item:
+            item_selected = st.selectbox(
+                "",
+                options=filtered_items,
+                format_func=lambda it: f"{it['name']} ({it['id']})",
+                key="search_select",
+                label_visibility="collapsed",
+                **selectbox_kwargs,
+            )
+
     if item_selected is None:
         st.info("Escolha um item para começar.")
         return
@@ -478,280 +655,519 @@ def render():
     item_name = item_selected["name"]
 
     # ======================================================
-    #  BLOCO DE EDIÇÃO / REGISTRO DE PREÇO
-    #  (APENAS MODO NORMAL, NUNCA NO DEMO)
+    #  Variações existentes desse item (para combo + análise)
     # ======================================================
-    if not demo_mode:
-        #  Ação pós-clique (confirmar / cancelar atualização)
-        action = ss.get("price_action")
+    existing_variations: list[dict] = []
+    if not df_prices_all.empty:
+        df_item_vars = df_prices_all[
+            (df_prices_all["item_id"] == item_id)
+            & df_prices_all["variation_key"].notna()
+        ].copy()
 
-        if action == "confirm_update":
-            pending = ss.get("pending_update")
-            if pending is not None:
-                admin_flag = is_admin()
-                user_id = ss.get("user_email") or ss.get("username") or "desconhecido"
+        if not df_item_vars.empty:
+            df_item_vars["date_parsed"] = pd.to_datetime(df_item_vars["date"])
+            df_item_vars = df_item_vars.sort_values("date_parsed")
 
-                if admin_flag:
-                    update_price(
-                        pending["item_id"],
-                        pending["date_str"],
-                        pending["new_price"],
+            last_per_var = df_item_vars.groupby("variation_key", as_index=False).last()
+
+            for _, row in last_per_var.iterrows():
+                vk = row["variation_key"]
+                refine_val = row.get("refine")
+                extra_desc_val = row.get("extra_desc")
+                card_ids_raw = row.get("card_ids")
+
+                card_ids_list: list[int] = []
+                if isinstance(card_ids_raw, list):
+                    card_ids_list = [int(c) for c in card_ids_raw if c is not None]
+                elif isinstance(card_ids_raw, str) and card_ids_raw.strip():
+                    for tok in card_ids_raw.split(","):
+                        tok = tok.strip()
+                        if tok:
+                            try:
+                                card_ids_list.append(int(tok))
+                            except ValueError:
+                                pass
+
+                display_name = build_display_name(
+                    item_name=item_name,
+                    refine=refine_val,
+                    card_ids=card_ids_list,
+                    extra_desc=extra_desc_val,
+                    card_id_to_name=card_id_to_name,
+                )
+
+                existing_variations.append(
+                    {
+                        "variation_key": vk,
+                        "refine": int(refine_val) if refine_val is not None else 0,
+                        "extra_desc": extra_desc_val or "",
+                        "card_ids_list": card_ids_list,
+                        "display_name": display_name,
+                    }
+                )
+
+    # ======================================================
+    #  BLOCO DE EDIÇÃO / REGISTRO DE PREÇO
+    # ======================================================
+    current_variation_key: str | None = None
+    current_display_name = item_name
+
+    action = ss.get("price_action")
+
+    if action == "confirm_update":
+        pending = ss.get("pending_update")
+        if pending is not None:
+            admin_flag = is_admin()
+            user_id = ss.get("user_email") or ss.get("username") or "desconhecido"
+            vk = pending.get("variation_key", "") or ""
+
+            if admin_flag:
+                update_price(
+                    pending["item_id"],
+                    pending["date_str"],
+                    pending["new_price"],
+                    variation_key=vk,
+                )
+                try:
+                    log_price_change(
+                        item_id=pending["item_id"],
+                        date_str=pending["date_str"],
+                        old_price_zeny=pending["existing_price"],
+                        new_price_zeny=pending["new_price"],
+                        changed_by=user_id,
+                        source="DIRECT_ADMIN",
+                        refine=pending.get("refine"),
+                        card_ids=pending.get("card_ids_str"),
+                        extra_desc=pending.get("extra_desc"),
+                        variation_key=vk,
+                    )
+                except Exception as e:
+                    print(f"[WARN] Falha ao logar alteração de preço: {e}")
+
+                try:
+                    log_price_action(
+                        item_id=pending["item_id"],
+                        date_str=pending["date_str"],
+                        action_type="update",
+                        actor_email=user_id,
+                        actor_role="admin",
+                        old_price=pending["existing_price"],
+                        new_price=pending["new_price"],
+                        request_id=None,
+                        refine=pending.get("refine"),
+                        card_ids=pending.get("card_ids_str"),
+                        extra_desc=pending.get("extra_desc"),
+                        variation_key=vk,
+                    )
+                except Exception as e:
+                    print(
+                        f"[WARN] Falha ao logar ação de update em price_audit_log: {e}"
                     )
 
-                    try:
-                        log_price_change(
-                            item_id=pending["item_id"],
-                            date_str=pending["date_str"],
-                            old_price_zeny=pending["existing_price"],
-                            new_price_zeny=pending["new_price"],
-                            changed_by=user_id,
-                            source="DIRECT_ADMIN",
-                        )
-                    except Exception as e:
-                        print(f"[WARN] Falha ao logar alteração de preço: {e}")
+                get_all_prices_cached.clear()
+                get_global_summary_cached.clear()
+                get_price_history_cached.clear()
 
-                    try:
-                        log_price_action(
-                            item_id=pending["item_id"],
-                            date_str=pending["date_str"],
-                            action_type="update",
-                            actor_email=user_id,
-                            actor_role="admin",
-                            old_price=pending["existing_price"],
-                            new_price=pending["new_price"],
-                            request_id=None,
-                        )
-                    except Exception as e:
-                        print(
-                            f"[WARN] Falha ao logar ação de update em price_audit_log: {e}"
-                        )
+                ss["clear_price"] = True
+                ss["flash_message"] = "Preço atualizado com sucesso!"
+                ss["flash_type"] = "success"
+                ss["pending_update"] = None
+                ss["price_action"] = None
+                st.rerun()
+            else:
+                try:
+                    req_id = create_price_change_request(
+                        pending["item_id"],
+                        pending["date_str"],
+                        pending["existing_price"],
+                        pending["new_price"],
+                        user_id,
+                        None,
+                        refine=pending.get("refine"),
+                        card_ids=pending.get("card_ids_str"),
+                        extra_desc=pending.get("extra_desc"),
+                        variation_key=vk,
+                    )
+                    print(f"===== DEBUG: Solicitação criada com id={req_id} =====")
+                    ss["flash_message"] = (
+                        "Solicitação de alteração enviada para os administradores."
+                    )
+                    ss["flash_type"] = "info"
+                except Exception as e:
+                    print("\n===== DEBUG ERROR =====")
+                    print("Erro no envio da solicitação:")
+                    print(e)
+                    print("Tipo:", type(e))
+                    print("========================\n")
+                    ss["flash_message"] = (
+                        "Não foi possível enviar a solicitação. "
+                        "Tente novamente mais tarde ou fale com um admin."
+                    )
 
-                    get_all_prices_cached.clear()
-                    get_global_summary_cached.clear()
-                    get_price_history_cached.clear()
+                ss["pending_update"] = None
+                ss["price_action"] = None
+                st.rerun()
 
-                    ss["clear_price"] = True
-                    ss["flash_message"] = "Preço atualizado com sucesso!"
-                    ss["flash_type"] = "success"
-                    ss["pending_update"] = None
-                    ss["price_action"] = None
-                    st.rerun()
-                else:
-                    try:
-                        req_id = create_price_change_request(
-                            pending["item_id"],
-                            pending["date_str"],
-                            pending["existing_price"],
-                            pending["new_price"],
-                            user_id,
-                            None,
-                        )
+    elif action == "cancel_update":
+        ss["pending_update"] = None
+        ss["flash_message"] = "Atualização cancelada. Nenhuma alteração foi feita."
+        ss["flash_type"] = "info"
+        ss["price_action"] = None
+        st.rerun()
 
-                        print(
-                            f"===== DEBUG: Solicitação criada com id={req_id} ====="
-                        )
+    # ------------------------------
+    #  Bloco de variação do item
+    # ------------------------------
+    st.markdown("---")
+    st.markdown(
+        """
+        <div class="card">
+          <div class="section-title">
+            <span class="icon">🎯</span>
+            <span>Configuração do item (refino, cartas, encantos)</span>
+          </div>
+          <div class="section-subtitle">
+            Essas informações descrevem a variação do item e serão usadas
+            em todos os registros de preço que você fizer.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-                        ss["flash_message"] = (
-                            "Solicitação de alteração enviada para os administradores."
-                        )
-                        ss["flash_type"] = "info"
-                    except Exception as e:
-                        print("\n===== DEBUG ERROR =====")
-                        print("Erro no envio da solicitação:")
-                        print(e)
-                        print("Tipo:", type(e))
-                        print("========================\n")
+    # 1) Combo de configuração base (existente x nova)
+    base_options = ["Nova variação"] + [v["display_name"] for v in existing_variations]
+    label_to_var = {v["display_name"]: v for v in existing_variations}
 
-                        ss["flash_message"] = (
-                            "Não foi possível enviar a solicitação. "
-                            "Tente novamente mais tarde ou fale com um admin."
-                        )
-                        ss["flash_type"] = "warning"
+    config_choice = st.selectbox(
+        "Configuração base para registrar",
+        options=base_options,
+        key=f"config_variation_select_{item_id}",
+    )
+    is_existing_config = config_choice != "Nova variação"
 
-                    ss["pending_update"] = None
-                    ss["price_action"] = None
-                    st.rerun()
+    # Se for variação existente, preenche state com a config e trava campos
+    if is_existing_config:
+        rec_cfg = label_to_var[config_choice]
 
-        elif action == "cancel_update":
-            ss["pending_update"] = None
-            ss["flash_message"] = (
-                "Atualização cancelada. Nenhuma alteração foi feita."
-            )
-            ss["flash_type"] = "info"
-            ss["price_action"] = None
-            st.rerun()
+        ss["var_refine"] = rec_cfg["refine"]
+        ss["var_extra_desc"] = rec_cfg["extra_desc"]
 
-        st.markdown("---")
+        cards_ids_cfg = rec_cfg["card_ids_list"]
+        for idx in range(4):
+            slot_key = f"var_card_slot_{idx+1}"
+            if idx < len(cards_ids_cfg):
+                cid = cards_ids_cfg[idx]
+                label = f"{card_id_to_name.get(cid, str(cid))} ({cid})"
+            else:
+                label = "(vazio)"
+            ss[slot_key] = label
 
-        # ------------------------------
-        #  Card de registro diário
-        # ------------------------------
-        st.markdown(
-            """
-            <div class="card">
-              <div class="section-title">
-                <span class="icon">📝</span>
-                <span>Registrar preço diário</span>
-              </div>
-              <div class="section-subtitle">
-                Selecione o item e registre o preço do dia para alimentar o histórico.
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
+    # 2) Campos de edição (refino + extras)
+    var_col_ref, var_col_extra = st.columns([1, 3])
+
+    with var_col_ref:
+        refine_val = st.number_input(
+            "Refino",
+            min_value=0,
+            max_value=20,
+            step=1,
+            key="var_refine",
+            disabled=is_existing_config,
         )
 
-        # Limpa input se precisou ou mudou de item
-        if ss["clear_price"]:
-            ss["price_value"] = ""
-            ss["clear_price"] = False
+    refine_val = ss.get("var_refine", 0)
 
-        if item_id != ss["last_item_id"]:
-            ss["price_value"] = ""
-            ss["last_item_id"] = item_id
 
-        # Flash message (sucesso / info após insert/update/cancel)
-        if ss["flash_message"]:
-            level = ss.get("flash_type", "success")
-            msg = ss["flash_message"]
 
-            if level == "success":
-                st.success(msg)
-            elif level == "info":
-                st.info(msg)
-            elif level == "warning":
-                st.warning(msg)
-            else:
-                st.write(msg)
+    with var_col_extra:
+        extra_desc = st.text_input(
+            "Encantos / Observações",
+            key="var_extra_desc",
+            placeholder="Opcional (ex: encantos, observações)",
+            disabled=is_existing_config,
+        )
 
-            ss["flash_message"] = ""
-            ss["flash_type"] = "success"
+    # 3) Cartas (até 4 slots)
+    st.markdown("**Cartas (até 4 slots)**")
+    card_slot_cols = st.columns(4)
 
-        # Formulário de registro
-        with st.form(key="price_form"):
-            form_col_date, form_col_price, form_col_btn = st.columns([2, 2, 1])
+    card_options = ["(vazio)"] + [f"{c['name']} ({c['id']})" for c in cards_list]
 
-            with form_col_date:
-                sel_date = st.date_input(
-                    "Data",
-                    value=date.today(),
-                    key="price_date",
-                )
+    card_slot_choices: list[str] = []
+    for idx, col in enumerate(card_slot_cols, start=1):
+        with col:
+            choice = st.selectbox(
+                f"Slot {idx}",
+                options=card_options,
+                key=f"var_card_slot_{idx}",
+                disabled=is_existing_config,
+            )
+            card_slot_choices.append(choice)
 
-            with form_col_price:
-                price_str = st.text_input(
-                    "Preço (zeny)",
-                    key="price_value",
-                    placeholder="Ex: 650.000 ou 600000",
-                )
-
-            with form_col_btn:
-                st.markdown("<div style='height: 1.8rem'></div>", unsafe_allow_html=True)
-                save_clicked = st.form_submit_button(
-                    "Salvar", use_container_width=True
-                )
-
-        # Clique no salvar → decide entre INSERT ou fluxo de confirmação
-        if save_clicked and not ss.get("is_saving", False):
-            ss["is_saving"] = True
+    # Monta lista de IDs de cartas a partir dos slots
+    card_ids_current: list[int] = []
+    for choice in card_slot_choices:
+        if choice and choice != "(vazio)":
             try:
-                if not price_str.strip():
-                    st.warning("Informe um preço.")
-                else:
-                    normalized = price_str.replace(".", "").replace(",", "")
-                    try:
-                        price_val = int(normalized)
+                cid_str = choice.split("(")[-1].rstrip(")")
+                card_ids_current.append(int(cid_str))
+            except ValueError:
+                pass
 
-                        if price_val <= 0:
-                            st.warning("Informe um preço maior que zero.")
-                            return
+    cards_for_current: list[int] | None = card_ids_current if card_ids_current else None
 
-                        if sel_date > date.today():
-                            st.warning(
-                                "Não é permitido registrar preço em data futura."
-                            )
-                            return
+    # variation_key e display_name atuais
+    current_variation_key = build_variation_key(
+        refine_val,
+        cards_for_current,
+        extra_desc,
+    )
+    current_display_name = build_display_name(
+        item_name=item_name,
+        refine=refine_val,
+        card_ids=cards_for_current,
+        extra_desc=extra_desc,
+        card_id_to_name=card_id_to_name,
+    )
 
-                        date_str = sel_date.isoformat()
-                        existing_price = get_existing_price(item_id, date_str)
+    st.markdown("---")
 
-                        if existing_price is None:
-                            insert_price(item_id, date_str, price_val)
+    # ------------------------------
+    #  Card de registro diário
+    # ------------------------------
+    st.markdown(
+        """
+        <div class="card">
+          <div class="section-title">
+            <span class="icon">📝</span>
+            <span>Registrar preço diário</span>
+          </div>
+          <div class="section-subtitle">
+            Informe a data e o preço para registrar mais um ponto no histórico.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-                            get_all_prices_cached.clear()
-                            get_global_summary_cached.clear()
-                            get_price_history_cached.clear()
+    # Limpa input se precisou ou mudou de item
+    if ss["clear_price"]:
+        ss["price_value"] = ""
+        ss["clear_price"] = False
 
-                            ss["clear_price"] = True
-                            ss["flash_message"] = "Preço salvo com sucesso!"
-                            ss["flash_type"] = "success"
-                            ss["pending_update"] = None
-                            ss["is_saving"] = False
-                            st.rerun()
-                        else:
-                            ss["pending_update"] = {
-                                "item_id": item_id,
-                                "item_name": item_name,
-                                "date_str": date_str,
-                                "existing_price": existing_price,
-                                "new_price": price_val,
-                            }
-                            st.warning(
-                                "Já existe um preço cadastrado para este item nesta data. "
-                                "Confira abaixo antes de confirmar a atualização."
-                            )
-                    except ValueError:
-                        st.warning(
-                            "Preço inválido. Use apenas números "
-                            "(ex: 650000, 650.000 ou 650,000)."
-                        )
-            finally:
-                # se não deu rerun lá em cima, garante que desliga a flag
-                ss["is_saving"] = False
+    if item_id != ss["last_item_id"]:
+        ss["price_value"] = ""
+        ss["last_item_id"] = item_id
 
-        pending = ss.get("pending_update")
+    # Flash message
+    if ss["flash_message"]:
+        level = ss.get("flash_type", "success")
+        msg = ss["flash_message"]
+        if level == "success":
+            st.success(msg)
+        elif level == "info":
+            st.info(msg)
+        elif level == "warning":
+            st.warning(msg)
+        else:
+            st.write(msg)
+        ss["flash_message"] = ""
+        ss["flash_type"] = "success"
 
-        if pending is not None:
-            st.info(
-                f"Para **{pending['item_name']}** em **{pending['date_str']}**:\n\n"
-                f"- Preço atual: **{fmt_zeny(pending['existing_price'])} zeny**\n"
-                f"- Novo preço: **{fmt_zeny(pending['new_price'])} zeny**"
+    # Formulário de registro (Data / Preço)
+    with st.form(key="price_form"):
+        form_col_date, form_col_price, form_col_btn = st.columns([2, 2, 1])
+
+        with form_col_date:
+            sel_date = st.date_input(
+                "Data",
+                value=date.today(),
+                key="price_date",
             )
 
-            col_confirm, col_cancel = st.columns([1, 1])
+        with form_col_price:
+            price_str = st.text_input(
+                "Preço (zeny)",
+                key="price_value",
+                placeholder="Ex: 650.000 ou 600000",
+            )
 
-            if is_admin():
-                col_confirm.button(
-                    "✅ Atualizar preço do dia",
-                    key="btn_confirm_update",
-                    use_container_width=True,
-                    on_click=lambda: ss.update(price_action="confirm_update"),
-                )
+        with form_col_btn:
+            st.markdown("<div style='height: 1.8rem'></div>", unsafe_allow_html=True)
+            save_clicked = st.form_submit_button("Salvar", use_container_width=True)
+
+    # Clique no salvar → decide entre INSERT ou fluxo de confirmação
+    if save_clicked and not ss.get("is_saving", False):
+        ss["is_saving"] = True
+        try:
+            if not price_str.strip():
+                st.warning("Informe um preço.")
             else:
-                col_confirm.button(
-                    "♻️ Enviar solicitação para admin",
-                    key="btn_request_change",
-                    use_container_width=True,
-                    on_click=lambda: ss.update(price_action="confirm_update"),
-                )
+                variation_key = current_variation_key
 
-            col_cancel.button(
-                "❌ Cancelar atualização",
-                key="btn_cancel_update",
+                normalized = price_str.replace(".", "").replace(",", "")
+                try:
+                    price_val = int(normalized)
+
+                    if price_val <= 0:
+                        st.warning("Informe um preço maior que zero.")
+                        return
+
+                    if sel_date > date.today():
+                        st.warning("Não é permitido registrar preço em data futura.")
+                        return
+
+                    date_str = sel_date.isoformat()
+
+                    # verifica se já existe preço PARA ESSA MESMA VARIAÇÃO
+                    existing_price = get_existing_price(
+                        item_id,
+                        date_str,
+                        variation_key,
+                    )
+
+                    if existing_price is None:
+                        # INSERT NOVO PREÇO
+                        insert_price(
+                            item_id=item_id,
+                            date_str=date_str,
+                            price_zeny=price_val,
+                            refine=int(refine_val),
+                            card_ids=cards_for_current,
+                            extra_desc=extra_desc or None,
+                            variation_key=variation_key,
+                        )
+
+                        get_all_prices_cached.clear()
+                        get_global_summary_cached.clear()
+                        get_price_history_cached.clear()
+
+                        # Marca para resetar variação na próxima execução
+                        ss["reset_variation_fields"] = True
+                        ss["clear_price"] = True
+                        ss["flash_message"] = "Preço salvo com sucesso!"
+                        ss["flash_type"] = "success"
+                        ss["pending_update"] = None
+                        ss["is_saving"] = False
+
+                        st.rerun()
+
+                    else:
+                        # Já existe preço nessa data PARA ESSA MESMA VARIAÇÃO
+                        variation_desc = describe_variation(
+                            refine_val,
+                            cards_for_current,
+                            extra_desc,
+                            card_id_to_name,
+                        )
+                        card_ids_str = (
+                            ",".join(map(str, cards_for_current))
+                            if cards_for_current
+                            else None
+                        )
+
+                        ss["pending_update"] = {
+                            "item_id": item_id,
+                            "item_name": item_name,
+                            "date_str": date_str,
+                            "existing_price": existing_price,
+                            "new_price": price_val,
+                            "variation_desc": variation_desc,
+                            "variation_key": variation_key,
+                            "refine": int(refine_val),
+                            "card_ids_str": card_ids_str,
+                            "extra_desc": extra_desc or None,
+                        }
+                        st.warning(
+                            "Já existe um preço cadastrado para este item nesta data "
+                            "nessa mesma configuração. "
+                            "Confira abaixo antes de confirmar a atualização."
+                        )
+                except ValueError:
+                    st.warning(
+                        "Preço inválido. Use apenas números "
+                        "(ex: 650000, 650.000 ou 650,000)."
+                    )
+        finally:
+            ss["is_saving"] = False
+
+    pending = ss.get("pending_update")
+    if pending is not None:
+        variation_desc = pending.get("variation_desc", "Configuração padrão")
+        st.info(
+            f"Para **{pending['item_name']}** em **{pending['date_str']}** "
+            f"na variação **{variation_desc}**:\n\n"
+            f"- Preço atual: **{fmt_zeny(pending['existing_price'])} zeny**\n"
+            f"- Novo preço: **{fmt_zeny(pending['new_price'])} zeny**"
+        )
+
+        col_confirm, col_cancel = st.columns([1, 1])
+
+        if is_admin():
+            col_confirm.button(
+                "✅ Atualizar preço do dia",
+                key="btn_confirm_update",
                 use_container_width=True,
-                on_click=lambda: ss.update(price_action="cancel_update"),
+                on_click=lambda: ss.update(price_action="confirm_update"),
+            )
+        else:
+            col_confirm.button(
+                "♻️ Enviar solicitação para admin",
+                key="btn_request_change",
+                use_container_width=True,
+                on_click=lambda: ss.update(price_action="confirm_update"),
             )
 
-        st.markdown("---")
+        col_cancel.button(
+            "❌ Cancelar atualização",
+            key="btn_cancel_update",
+            use_container_width=True,
+            on_click=lambda: ss.update(price_action="cancel_update"),
+        )
 
-    else:
-        # Demo: só separador para ir pros KPIs / gráficos
-        st.markdown("---")
+    st.markdown("---")
 
     # ======================================================
-    #  KPIs do item selecionado
+    #  KPIs e escolha de variação para análise
     # ======================================================
-    hist_local_raw = get_price_history_cached(item_id)
+    analysis_variation_key = current_variation_key
+    analysis_display_name = current_display_name
+
+    if existing_variations:
+        st.markdown("**Variação para análise**")
+        labels_analysis = [v["display_name"] for v in existing_variations]
+        label_to_var_analysis = {v["display_name"]: v for v in existing_variations}
+
+        # chave de estado do selectbox de análise (uma por item)
+        analysis_key = f"analysis_variation_select_{item_id}"
+
+        # 🔄 Sincroniza automaticamente a variação de análise
+        # com a variação escolhida em "Configuração base para registrar"
+        if current_variation_key:
+            matched_label = None
+            for v in existing_variations:
+                if v["variation_key"] == current_variation_key:
+                    matched_label = v["display_name"]
+                    break
+
+            if matched_label is not None:
+                if st.session_state.get(analysis_key) != matched_label:
+                    st.session_state[analysis_key] = matched_label
+
+        selected_label_analysis = st.selectbox(
+            "",
+            options=labels_analysis,
+            key=analysis_key,
+            label_visibility="collapsed",
+        )
+
+        rec_analysis = label_to_var_analysis[selected_label_analysis]
+        analysis_variation_key = rec_analysis["variation_key"]
+        analysis_display_name = rec_analysis["display_name"]
+
+    # Histórico já filtrado pela variação em análise
+    hist_local_raw = get_price_history_cached(item_id, analysis_variation_key)
     if not hist_local_raw.empty:
         hist_local = hist_local_raw.copy()
         hist_local["date"] = pd.to_datetime(hist_local["date"])
@@ -766,7 +1182,7 @@ def render():
     status = "-"
 
     if not df_sum_global.empty:
-        item_summary = df_sum_global[df_sum_global["Item"] == item_name]
+        item_summary = df_sum_global[df_sum_global["Item"] == analysis_display_name]
         if not item_summary.empty:
             row = item_summary.iloc[0]
             try:
@@ -827,7 +1243,7 @@ def render():
     )
 
     if hist_local.empty:
-        st.info("Ainda não há dados suficientes para gerar insights para este item.")
+        st.info("Ainda não há dados suficientes para gerar insights para esta variação.")
     else:
         hist_last5 = hist_local.tail(5)
         prices_5 = hist_last5["price_zeny"]
@@ -958,12 +1374,12 @@ def render():
     st.markdown("---")
 
     # ======================================================
-    #  Histórico de preços
+    #  Histórico de preços (por variação)
     # ======================================================
-    st.subheader(f"📈 Histórico de preços – {item_name}")
+    st.subheader(f"📈 Histórico de preços – {analysis_display_name}")
 
     if hist_local.empty:
-        st.info("Ainda não há histórico para este item.")
+        st.info("Ainda não há histórico para esta variação.")
     else:
         st.caption("Período do gráfico")
         periodo = st.radio(
@@ -1008,23 +1424,27 @@ def render():
             )
         )
 
-        st.altair_chart(area + line, use_container_width=True)
-
-        st.subheader("📜 Tabela de histórico")
-
-        hist_display = hist_local.copy()
-        hist_display["Data"] = hist_display["date"].dt.date.astype(str)
-        hist_display["Preço (zeny)"] = hist_display["price_zeny"].apply(fmt_zeny)
-        hist_display["Criado em"] = hist_display["created_at"]
-
-        hist_display = hist_display[["Data", "Preço (zeny)", "Criado em"]]
-
-        st.dataframe(
-            hist_display.sort_values("Data", ascending=False).reset_index(drop=True),
-            use_container_width=True,
-            hide_index=True,
-            height=400,
+        chart_key = (
+            f"hist_chart_{item_id}_{analysis_variation_key}_{periodo}_{len(hist_plot)}"
         )
+        st.altair_chart(area + line, use_container_width=True, key=chart_key)
+
+        with st.expander("📜 Ver tabela completa de histórico desta variação"):
+            hist_display = hist_local.copy()
+            hist_display["Data"] = hist_display["date"].dt.date.astype(str)
+            hist_display["Preço (zeny)"] = hist_display["price_zeny"].apply(fmt_zeny)
+            hist_display["Criado em"] = hist_display["created_at"]
+
+            hist_display = hist_display[["Data", "Preço (zeny)", "Criado em"]]
+
+            st.dataframe(
+                hist_display.sort_values("Data", ascending=False).reset_index(
+                    drop=True
+                ),
+                use_container_width=True,
+                hide_index=True,
+                height=400,
+            )
 
     st.markdown("---")
 
@@ -1070,6 +1490,7 @@ def render():
                     "Variação % vs média 5": "Var % vs 5d",
                 }
             )
+
             return df[
                 [
                     "Item",
@@ -1122,13 +1543,26 @@ def render():
         lambda x: fmt_pct(x * 100.0 if abs(x) < 1.0 else x)
     )
 
+    df_display = df_display.rename(
+        columns={
+            "Último preço (zeny)": "Últ. preço",
+            "Média últimos 5": "Média 5d",
+            "Variação % vs média 5": "Var % vs 5d",
+        }
+    )
+
+    # Garantir coluna Cartas preenchida
+    if "Cartas" not in df_display.columns:
+        df_display["Cartas"] = "-"
+
     df_display = df_display[
         [
             "Item",
+            "Cartas",
             "Última data",
-            "Último preço (zeny)",
-            "Média últimos 5",
-            "Variação % vs média 5",
+            "Últ. preço",
+            "Média 5d",
+            "Var % vs 5d",
             "Status",
         ]
     ]
@@ -1138,6 +1572,36 @@ def render():
         use_container_width=True,
         hide_index=True,
         height=450,
+        column_config={
+            "Item": st.column_config.TextColumn(
+                "Item",
+                width="large",
+            ),
+            "Cartas": st.column_config.TextColumn(
+                "Cartas",
+                width="medium",
+            ),
+            "Última data": st.column_config.TextColumn(
+                "Última data",
+                width="small",
+            ),
+            "Últ. preço": st.column_config.TextColumn(
+                "Últ. preço",
+                width="small",
+            ),
+            "Média 5d": st.column_config.TextColumn(
+                "Média 5d",
+                width="small",
+            ),
+            "Var % vs 5d": st.column_config.TextColumn(
+                "Var % vs 5d",
+                width="small",
+            ),
+            "Status": st.column_config.TextColumn(
+                "Status",
+                width="small",
+            ),
+        },
     )
 
 
