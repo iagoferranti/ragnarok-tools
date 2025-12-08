@@ -103,6 +103,50 @@ def normalize_text(txt: str) -> str:
     )
 
 
+def normalize_variation_key_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normaliza a coluna variation_key para evitar duplicidade entre:
+    - registros antigos (variation_key = '' ou NULL)
+    - registros novos simples (variation_key = 'r0' sem cartas / extra)
+
+    Tudo isso vira 'base'.
+    """
+    df = df.copy()
+
+    if "variation_key" not in df.columns:
+        df["variation_key"] = "base"
+        return df
+
+    # Começa sempre como string
+    df["variation_key"] = df["variation_key"].fillna("").astype(str)
+
+    # Campos auxiliares
+    refine_series = df.get("refine", 0).fillna(0).astype(int)
+    extra_series = df.get("extra_desc", "").fillna("").astype(str).str.strip()
+    card_series = df.get("card_ids", pd.Series([None] * len(df)))
+
+    # card_ids vazios (NULL, '' ou '[]')
+    card_empty = card_series.isna()
+    try:
+        card_empty = card_empty | card_series.astype(str).isin(["", "[]"])
+    except Exception:
+        pass
+
+    # Casos que são a variação base
+    mask_base = (
+        (df["variation_key"] == "")
+        | (
+            (df["variation_key"] == "r0")
+            & (refine_series == 0)
+            & card_empty
+            & (extra_series == "")
+        )
+    )
+
+    df.loc[mask_base, "variation_key"] = "base"
+    return df
+
+
 # ============================================
 #  Cache de dados
 # ============================================
@@ -121,10 +165,14 @@ def get_price_history_cached(item_id: int, variation_key: str | None) -> pd.Data
     """
     Wrapper cacheado para histórico.
     Se variation_key for informado, filtra; caso contrário, retorna histórico completo do item.
+    Normaliza variation_key para unir registros antigos ('', NULL, 'r0' simples) em 'base'.
     """
     df = get_price_history_df(item_id)
+    df = normalize_variation_key_df(df)
+
     if variation_key:
         df = df[df["variation_key"] == variation_key]
+
     return df.copy()
 
 
@@ -194,7 +242,8 @@ def get_global_summary_cached() -> pd.DataFrame:
     items_df = get_items_cached()
     card_id_to_name = dict(zip(items_df["id"], items_df["name"]))
 
-    df = df_prices_all.copy()
+    # Normaliza variation_key ('' / NULL / 'r0' simples -> 'base')
+    df = normalize_variation_key_df(df_prices_all)
 
     # Nome exibido levando em conta refino, cartas e encantos
     df["item_display"] = df.apply(
@@ -207,11 +256,6 @@ def get_global_summary_cached() -> pd.DataFrame:
         ),
         axis=1,
     )
-
-    # Garante coluna variation_key
-    if "variation_key" not in df.columns:
-        df["variation_key"] = "base"
-    df["variation_key"] = df["variation_key"].fillna("base")
 
     # Cada combinação (item_id + variation_key) vira um "item" independente
     df["item_id_var"] = df["item_id"].astype(str) + "|" + df["variation_key"]
@@ -269,17 +313,19 @@ def get_global_summary_cached() -> pd.DataFrame:
     df_summary = compute_summary(df_summary_input)
 
     # Merge das cartas no resumo global
-    df_summary = df_summary.merge(
-        df_cards_agg[["item_id_var", "Cartas"]]
-        .rename(columns={"item_id_var": "Item ID"}),
-        left_on="Item ID",
-        right_on="Item ID",
-        how="left",
-    ) if "Item ID" in df_summary.columns else df_summary.merge(
-        df_cards_agg[["Item", "Cartas"]],
-        on="Item",
-        how="left",
-    )
+    if "Item ID" in df_summary.columns:
+        df_summary = df_summary.merge(
+            df_cards_agg[["item_id_var", "Cartas"]]
+            .rename(columns={"item_id_var": "Item ID"}),
+            on="Item ID",
+            how="left",
+        )
+    else:
+        df_summary = df_summary.merge(
+            df_cards_agg[["Item", "Cartas"]],
+            on="Item",
+            how="left",
+        )
 
     if "Cartas" not in df_summary.columns:
         df_summary["Cartas"] = "-"
@@ -355,23 +401,35 @@ def build_variation_key(refine: int, cards: list[int] | None, extra: str | None)
     - refinos
     - combinações de cartas
     - encantos / observações
+
+    Regra especial:
+    - Se for item "puro" (refino 0, sem cartas e sem extra) -> 'base'
     """
+    r = int(refine or 0)
+
+    cards_list = cards or []
+    extra_norm = ""
+    if extra:
+        extra_norm = normalize_text(extra).replace("|", " ").strip()
+
+    # Variação "pura" => chave única 'base'
+    if r == 0 and not cards_list and not extra_norm:
+        return "base"
+
     parts: list[str] = []
 
     # refino
-    parts.append(f"r{int(refine)}")
+    parts.append(f"r{r}")
 
     # cartas (ordenadas e únicas)
-    if cards:
-        cards_sorted = sorted(set(cards))
+    if cards_list:
+        cards_sorted = sorted(set(cards_list))
         cards_str = "-".join(str(cid) for cid in cards_sorted)
         parts.append(f"c{cards_str}")
 
-    # extra (normalizado, sem acento, lower)
-    if extra:
-        norm = normalize_text(extra).replace("|", " ").strip()
-        if norm:
-            parts.append(f"e{norm}")
+    # extra
+    if extra_norm:
+        parts.append(f"e{extra_norm}")
 
     return "|".join(parts)
 
@@ -659,15 +717,14 @@ def render():
     # ======================================================
     existing_variations: list[dict] = []
     if not df_prices_all.empty:
-        df_item_vars = df_prices_all[
-            (df_prices_all["item_id"] == item_id)
-            & df_prices_all["variation_key"].notna()
-        ].copy()
+        df_item_vars = df_prices_all[df_prices_all["item_id"] == item_id].copy()
+        df_item_vars = normalize_variation_key_df(df_item_vars)
 
         if not df_item_vars.empty:
             df_item_vars["date_parsed"] = pd.to_datetime(df_item_vars["date"])
             df_item_vars = df_item_vars.sort_values("date_parsed")
 
+            # Um registro por variation_key (mais recente)
             last_per_var = df_item_vars.groupby("variation_key", as_index=False).last()
 
             for _, row in last_per_var.iterrows():
@@ -877,8 +934,6 @@ def render():
         )
 
     refine_val = ss.get("var_refine", 0)
-
-
 
     with var_col_extra:
         extra_desc = st.text_input(
@@ -1381,7 +1436,7 @@ def render():
     if hist_local.empty:
         st.info("Ainda não há histórico para esta variação.")
     else:
-        st.caption("Período do gráfico")
+        st.caption("Período do gráfico (últimos registros)")
         periodo = st.radio(
             "",
             options=["7 dias", "30 dias", "Tudo"],
@@ -1390,13 +1445,15 @@ def render():
         )
 
         if periodo == "7 dias":
-            min_date = hist_local["date"].max() - timedelta(days=7)
-            hist_plot = hist_local[hist_local["date"] >= min_date]
+            # últimos 7 registros (ou menos, se não tiver tudo isso)
+            hist_plot = hist_local.tail(7)
         elif periodo == "30 dias":
-            min_date = hist_local["date"].max() - timedelta(days=30)
-            hist_plot = hist_local[hist_local["date"] >= min_date]
+            # últimos 30 registros (ou menos)
+            hist_plot = hist_local.tail(30)
         else:
+            # todos os registros
             hist_plot = hist_local
+
 
         hist_plot = hist_plot.copy()
         hist_plot["date_str"] = hist_plot["date"].dt.date.astype(str)
